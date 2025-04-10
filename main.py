@@ -10,6 +10,7 @@ import os
 import threading
 import queue
 import random
+import re
 
 # Configure logging
 logging.basicConfig(
@@ -64,17 +65,12 @@ queue_processing = False
 # Data file
 DATA_FILE = 'last_releases.json'
 
-# Default message template
-MESSAGE_TEMPLATE = """🎵 *New release from {artist_name}*
-
+# Custom message template as requested
+MESSAGE_TEMPLATE = """*{artist_name}*
 *{release_name}*
-Type: {release_type}
-Release date: {release_date}
-Tracks: {total_tracks}
-{genres_line}
-[Listen on Spotify]({release_url})"""
-
-GENRES_TEMPLATE = "Genre: {genres}"
+{release_date} #{release_type_tag} {total_tracks} tracks
+{genres_hashtags}
+🎧 [Listen on Spotify]({release_url})"""
 
 # Initialize Spotify API
 try:
@@ -111,6 +107,13 @@ except Exception as e:
 
 # Initialize Telegram bot
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+
+def convert_to_hashtag(text):
+    """Convert text to hashtag format"""
+    # Replace spaces with underscores and remove special characters
+    hashtag = re.sub(r'[^\w\s]', '', text)
+    hashtag = hashtag.replace(' ', '_').lower()
+    return f"#{hashtag}"
 
 def load_last_releases():
     """Load data about last releases from file"""
@@ -169,7 +172,7 @@ def get_followed_artists():
                 followed_artists.append(artist_data)
             
             if results['artists']['next']:
-                results = sp.next(results)
+                results = sp.next(results['artists'])
             else:
                 results = None
         
@@ -221,30 +224,28 @@ def send_to_telegram(artist, release):
     try:
         artist_name = artist['name']
         
-        # Prepare genre line
-        genres_line = ""
+        # Prepare genre hashtags
+        genres_hashtags = ""
         if INCLUDE_GENRES and artist.get('genres'):
             # Get first MAX_GENRES_TO_SHOW genres
             genres = artist['genres'][:MAX_GENRES_TO_SHOW]
             
-            # Format genre string
-            genres_str = ", ".join(genres)
-            
-            # If there are more genres than MAX_GENRES_TO_SHOW, add "and more"
-            if len(artist['genres']) > MAX_GENRES_TO_SHOW:
-                genres_str += " and more"
-            
-            genres_line = GENRES_TEMPLATE.format(genres=genres_str)
+            # Format genres as hashtags
+            hashtags = [convert_to_hashtag(genre) for genre in genres]
+            genres_hashtags = " ".join(hashtags)
+        
+        # Create release type hashtag
+        release_type_tag = convert_to_hashtag(release['type'])
         
         # Prepare base message
         message = MESSAGE_TEMPLATE.format(
             artist_name=artist_name,
             release_name=release['name'],
-            release_type=release['type'].capitalize(),
             release_date=release['release_date'],
+            release_type_tag=release_type_tag,
             total_tracks=release.get('total_tracks', 'N/A'),
-            release_url=release['url'],
-            genres_line=genres_line
+            genres_hashtags=genres_hashtags,
+            release_url=release['url']
         )
 
         # Add message to queue
@@ -253,7 +254,8 @@ def send_to_telegram(artist, release):
             'release_name': release['name'],
             'message': message,
             'image_url': release['image_url'],
-            'add_poll': ADD_POLL
+            'add_poll': ADD_POLL,
+            'release_url': release['url']
         })
         
         logger.info(f"Added to posting queue: {artist_name} - {release['name']}")
@@ -303,7 +305,7 @@ def process_message_queue():
                 if message_data['add_poll']:
                     try:
                         # Wait a moment before posting poll
-                        time.sleep(1)
+                        time.sleep(2)
                         
                         poll_message = f"{message_data['artist_name']} - {message_data['release_name']}"
                         if len(poll_message) > 100:
@@ -312,17 +314,19 @@ def process_message_queue():
                         
                         poll_question = f"{POLL_QUESTION} {poll_message}"
                         
-                        # Create poll
-                        bot.send_poll(
-                            TELEGRAM_CHANNEL_ID,
+                        # Create poll with explicit chat_id
+                        poll = bot.send_poll(
+                            chat_id=TELEGRAM_CHANNEL_ID,
                             question=poll_question,
                             options=POLL_OPTIONS,
-                            is_anonymous=POLL_IS_ANONYMOUS
+                            is_anonymous=POLL_IS_ANONYMOUS,
+                            allows_multiple_answers=False
                         )
                         
                         logger.info(f"Poll created for release: {message_data['artist_name']} - {message_data['release_name']}")
                     except Exception as poll_error:
                         logger.error(f"Error creating poll: {poll_error}")
+                        logger.error(f"Poll error details - Type: {type(poll_error)}, Args: {poll_error.args}")
                 
                 # Mark message as processed
                 message_queue.task_done()
