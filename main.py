@@ -3,53 +3,10 @@ import logging
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
 import json
 import schedule
 import os
-
-# Import configuration
-try:
-    from config import (
-        SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET, SPOTIFY_REDIRECT_URI,
-        TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID, CHECK_INTERVAL_HOURS,
-        DATA_FILE, MESSAGE_TEMPLATE, GENRES_TEMPLATE,
-        INCLUDE_GENRES, MAX_GENRES_TO_SHOW,
-        ADD_POLL, POLL_QUESTION, POLL_OPTIONS, POLL_IS_ANONYMOUS
-    )
-except ImportError:
-    # If config file is not found, use environment variables directly
-    SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
-    SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
-    SPOTIFY_REDIRECT_URI = os.environ.get('SPOTIFY_REDIRECT_URI', 'https://spotify-refresh-token-generator.netlify.app/callback')
-    SPOTIFY_REFRESH_TOKEN = os.environ.get('SPOTIFY_REFRESH_TOKEN')
-    TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-    TELEGRAM_CHANNEL_ID = os.environ.get('TELEGRAM_CHANNEL_ID')
-    CHECK_INTERVAL_HOURS = int(os.environ.get('CHECK_INTERVAL_HOURS', '12'))
-    DATA_FILE = 'last_releases.json'
-    
-    # Default display settings
-    INCLUDE_GENRES = True
-    MAX_GENRES_TO_SHOW = 5
-    
-    # Poll settings
-    ADD_POLL = True
-    POLL_QUESTION = "Rate this release:"
-    POLL_OPTIONS = ["⭐", "⭐⭐", "⭐⭐⭐", "⭐⭐⭐⭐", "⭐⭐⭐⭐⭐"]
-    POLL_IS_ANONYMOUS = False
-    
-    # Default message template
-    MESSAGE_TEMPLATE = """🎵 *New release from {artist_name}*
-
-*{release_name}*
-Type: {release_type}
-Release date: {release_date}
-Tracks: {total_tracks}
-{genres_line}
-[Listen on Spotify]({release_url})"""
-    
-    GENRES_TEMPLATE = "Genre: {genres}"
 
 # Configure logging
 logging.basicConfig(
@@ -59,9 +16,58 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Initialize Spotify API with refresh token support
+# Load environment variables
+logger.info("Loading environment variables")
+SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
+SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
+SPOTIFY_REDIRECT_URI = os.environ.get('SPOTIFY_REDIRECT_URI', 'https://spotify-refresh-token-generator.netlify.app/callback')
+SPOTIFY_REFRESH_TOKEN = os.environ.get('SPOTIFY_REFRESH_TOKEN')
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHANNEL_ID = os.environ.get('TELEGRAM_CHANNEL_ID')
+CHECK_INTERVAL_HOURS = int(os.environ.get('CHECK_INTERVAL_HOURS', '12'))
+
+# Debug log environment variables (but hide secrets)
+logger.info(f"SPOTIFY_CLIENT_ID: {'SET' if SPOTIFY_CLIENT_ID else 'NOT SET'}")
+logger.info(f"SPOTIFY_CLIENT_SECRET: {'SET' if SPOTIFY_CLIENT_SECRET else 'NOT SET'}")
+logger.info(f"SPOTIFY_REDIRECT_URI: {SPOTIFY_REDIRECT_URI}")
+logger.info(f"SPOTIFY_REFRESH_TOKEN: {'SET' if SPOTIFY_REFRESH_TOKEN else 'NOT SET'}")
+logger.info(f"TELEGRAM_BOT_TOKEN: {'SET' if TELEGRAM_BOT_TOKEN else 'NOT SET'}")
+logger.info(f"TELEGRAM_CHANNEL_ID: {TELEGRAM_CHANNEL_ID}")
+logger.info(f"CHECK_INTERVAL_HOURS: {CHECK_INTERVAL_HOURS}")
+
+# Also set them as environment variables for spotipy library
+os.environ['SPOTIPY_CLIENT_ID'] = SPOTIFY_CLIENT_ID
+os.environ['SPOTIPY_CLIENT_SECRET'] = SPOTIFY_CLIENT_SECRET
+os.environ['SPOTIPY_REDIRECT_URI'] = SPOTIFY_REDIRECT_URI
+
+# Default display settings
+INCLUDE_GENRES = True
+MAX_GENRES_TO_SHOW = 5
+
+# Poll settings
+ADD_POLL = True
+POLL_QUESTION = "Rate this release:"
+POLL_OPTIONS = ["⭐", "⭐⭐", "⭐⭐⭐", "⭐⭐⭐⭐", "⭐⭐⭐⭐⭐"]
+POLL_IS_ANONYMOUS = False
+
+# Data file
+DATA_FILE = 'last_releases.json'
+
+# Default message template
+MESSAGE_TEMPLATE = """🎵 *New release from {artist_name}*
+
+*{release_name}*
+Type: {release_type}
+Release date: {release_date}
+Tracks: {total_tracks}
+{genres_line}
+[Listen on Spotify]({release_url})"""
+
+GENRES_TEMPLATE = "Genre: {genres}"
+
+# Initialize Spotify API
 try:
-    SPOTIFY_REFRESH_TOKEN = os.environ.get('SPOTIFY_REFRESH_TOKEN')
+    logger.info("Initializing Spotify API")
     
     if SPOTIFY_REFRESH_TOKEN:
         # Use refresh token for authorization
@@ -70,8 +76,7 @@ try:
             client_id=SPOTIFY_CLIENT_ID,
             client_secret=SPOTIFY_CLIENT_SECRET,
             redirect_uri=SPOTIFY_REDIRECT_URI,
-            scope="user-follow-read",
-            cache_path=".spotify_cache"
+            scope="user-follow-read"
         )
         
         # Get access token from refresh token
@@ -80,13 +85,13 @@ try:
     else:
         # Standard browser-based authorization (for local development)
         logger.info("Using standard OAuth flow for Spotify authentication")
-        sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
+        auth_manager = SpotifyOAuth(
             client_id=SPOTIFY_CLIENT_ID,
             client_secret=SPOTIFY_CLIENT_SECRET,
             redirect_uri=SPOTIFY_REDIRECT_URI,
-            scope="user-follow-read",
-            cache_path=".spotify_cache"
-        ))
+            scope="user-follow-read"
+        )
+        sp = spotipy.Spotify(auth_manager=auth_manager)
     
     logger.info("Spotify API initialized successfully")
 except Exception as e:
@@ -346,7 +351,7 @@ if __name__ == "__main__":
         'TELEGRAM_CHANNEL_ID'
     ]
     
-    missing_vars = [var for var in required_env_vars if not locals().get(var)]
+    missing_vars = [var for var in required_env_vars if not os.environ.get(var)]
     
     if missing_vars:
         logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
