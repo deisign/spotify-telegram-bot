@@ -7,6 +7,9 @@ from datetime import datetime, timedelta
 import json
 import schedule
 import os
+import threading
+import queue
+import random
 
 # Configure logging
 logging.basicConfig(
@@ -25,6 +28,8 @@ SPOTIFY_REFRESH_TOKEN = os.environ.get('SPOTIFY_REFRESH_TOKEN')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHANNEL_ID = os.environ.get('TELEGRAM_CHANNEL_ID')
 CHECK_INTERVAL_HOURS = int(os.environ.get('CHECK_INTERVAL_HOURS', '12'))
+POST_INTERVAL_MINUTES = int(os.environ.get('POST_INTERVAL_MINUTES', '60'))  # Default: 1 post per hour
+INITIAL_CHECK_DAYS = int(os.environ.get('INITIAL_CHECK_DAYS', '7'))  # Default: check last 7 days on first run
 
 # Debug log environment variables (but hide secrets)
 logger.info(f"SPOTIFY_CLIENT_ID: {'SET' if SPOTIFY_CLIENT_ID else 'NOT SET'}")
@@ -34,6 +39,8 @@ logger.info(f"SPOTIFY_REFRESH_TOKEN: {'SET' if SPOTIFY_REFRESH_TOKEN else 'NOT S
 logger.info(f"TELEGRAM_BOT_TOKEN: {'SET' if TELEGRAM_BOT_TOKEN else 'NOT SET'}")
 logger.info(f"TELEGRAM_CHANNEL_ID: {TELEGRAM_CHANNEL_ID}")
 logger.info(f"CHECK_INTERVAL_HOURS: {CHECK_INTERVAL_HOURS}")
+logger.info(f"POST_INTERVAL_MINUTES: {POST_INTERVAL_MINUTES}")
+logger.info(f"INITIAL_CHECK_DAYS: {INITIAL_CHECK_DAYS}")
 
 # Also set them as environment variables for spotipy library
 os.environ['SPOTIPY_CLIENT_ID'] = SPOTIFY_CLIENT_ID
@@ -49,6 +56,10 @@ ADD_POLL = True
 POLL_QUESTION = "Rate this release:"
 POLL_OPTIONS = ["⭐", "⭐⭐", "⭐⭐⭐", "⭐⭐⭐⭐", "⭐⭐⭐⭐⭐"]
 POLL_IS_ANONYMOUS = False
+
+# Message queue for throttled posting
+message_queue = queue.Queue()
+queue_processing = False
 
 # Data file
 DATA_FILE = 'last_releases.json'
@@ -107,6 +118,8 @@ def load_last_releases():
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, 'r') as f:
                 return json.load(f)
+        else:
+            logger.info(f"No existing {DATA_FILE} found, creating new data")
         return {}
     except Exception as e:
         logger.error(f"Error loading data: {e}")
@@ -117,6 +130,7 @@ def save_last_releases(data):
     try:
         with open(DATA_FILE, 'w') as f:
             json.dump(data, f)
+            logger.info(f"Successfully saved data to {DATA_FILE}")
     except Exception as e:
         logger.error(f"Error saving data: {e}")
 
@@ -155,7 +169,7 @@ def get_followed_artists():
                 followed_artists.append(artist_data)
             
             if results['artists']['next']:
-                results = sp.next(results['artists'])
+                results = sp.next(results)
             else:
                 results = None
         
@@ -168,8 +182,9 @@ def get_followed_artists():
 def get_artist_releases(artist_id, last_check_date=None):
     """Get artist releases since last check date"""
     if not last_check_date:
-        # If last check date is not specified, check releases for the last month
-        last_check_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        # If last check date is not specified, check releases for the configured days
+        last_check_date = (datetime.now() - timedelta(days=INITIAL_CHECK_DAYS)).strftime('%Y-%m-%d')
+        logger.info(f"No last check date, using {INITIAL_CHECK_DAYS} days ago: {last_check_date}")
     
     albums = []
     try:
@@ -202,7 +217,7 @@ def get_artist_releases(artist_id, last_check_date=None):
     return albums
 
 def send_to_telegram(artist, release):
-    """Send information about new release to Telegram channel"""
+    """Prepare message and add it to the queue"""
     try:
         artist_name = artist['name']
         
@@ -231,50 +246,102 @@ def send_to_telegram(artist, release):
             release_url=release['url'],
             genres_line=genres_line
         )
+
+        # Add message to queue
+        message_queue.put({
+            'artist_name': artist_name,
+            'release_name': release['name'],
+            'message': message,
+            'image_url': release['image_url'],
+            'add_poll': ADD_POLL
+        })
         
-        # Send message with image if available
-        if release['image_url']:
-            sent_message = bot.send_photo(
-                TELEGRAM_CHANNEL_ID,
-                release['image_url'],
-                caption=message,
-                parse_mode='Markdown'
-            )
-        else:
-            sent_message = bot.send_message(
-                TELEGRAM_CHANNEL_ID,
-                message,
-                parse_mode='Markdown',
-                disable_web_page_preview=False
-            )
+        logger.info(f"Added to posting queue: {artist_name} - {release['name']}")
         
-        # Add poll for rating the release if enabled
-        if ADD_POLL:
-            try:
-                poll_message = f"{artist_name} - {release['name']}"
-                if len(poll_message) > 100:
-                    # Telegram poll question length limit
-                    poll_message = poll_message[:97] + "..."
-                
-                poll_question = f"{POLL_QUESTION} {poll_message}"
-                
-                # Create poll
-                bot.send_poll(
-                    TELEGRAM_CHANNEL_ID,
-                    question=poll_question,
-                    options=POLL_OPTIONS,
-                    is_anonymous=POLL_IS_ANONYMOUS
-                )
-                
-                logger.info(f"Poll created for release: {artist_name} - {release['name']}")
-            except Exception as poll_error:
-                logger.error(f"Error creating poll: {poll_error}")
+        # Start queue processing if not already running
+        global queue_processing
+        if not queue_processing:
+            threading.Thread(target=process_message_queue).start()
         
-        logger.info(f"Message sent about release: {artist_name} - {release['name']}")
         return True
     except Exception as e:
-        logger.error(f"Error sending message to Telegram: {e}")
+        logger.error(f"Error preparing message for Telegram: {e}")
         return False
+
+def process_message_queue():
+    """Process message queue with delays between posts"""
+    global queue_processing
+    queue_processing = True
+    
+    logger.info("Started message queue processing thread")
+    
+    try:
+        while not message_queue.empty():
+            # Get next message from queue
+            message_data = message_queue.get()
+            
+            try:
+                # Send message with image if available
+                if message_data['image_url']:
+                    sent_message = bot.send_photo(
+                        TELEGRAM_CHANNEL_ID,
+                        message_data['image_url'],
+                        caption=message_data['message'],
+                        parse_mode='Markdown'
+                    )
+                else:
+                    sent_message = bot.send_message(
+                        TELEGRAM_CHANNEL_ID,
+                        message_data['message'],
+                        parse_mode='Markdown',
+                        disable_web_page_preview=False
+                    )
+                
+                logger.info(f"Posted message: {message_data['artist_name']} - {message_data['release_name']}")
+                
+                # Add poll if enabled
+                if message_data['add_poll']:
+                    try:
+                        # Wait a moment before posting poll
+                        time.sleep(1)
+                        
+                        poll_message = f"{message_data['artist_name']} - {message_data['release_name']}"
+                        if len(poll_message) > 100:
+                            # Telegram poll question length limit
+                            poll_message = poll_message[:97] + "..."
+                        
+                        poll_question = f"{POLL_QUESTION} {poll_message}"
+                        
+                        # Create poll
+                        bot.send_poll(
+                            TELEGRAM_CHANNEL_ID,
+                            question=poll_question,
+                            options=POLL_OPTIONS,
+                            is_anonymous=POLL_IS_ANONYMOUS
+                        )
+                        
+                        logger.info(f"Poll created for release: {message_data['artist_name']} - {message_data['release_name']}")
+                    except Exception as poll_error:
+                        logger.error(f"Error creating poll: {poll_error}")
+                
+                # Mark message as processed
+                message_queue.task_done()
+                
+                # Wait before posting next message
+                # Add some randomness to make it look more natural
+                sleep_time = POST_INTERVAL_MINUTES * 60 + random.randint(-60, 60)
+                sleep_time = max(60, sleep_time)  # Ensure at least 1 minute
+                logger.info(f"Waiting {sleep_time} seconds before posting next message")
+                time.sleep(sleep_time)
+                
+            except Exception as e:
+                logger.error(f"Error posting message: {e}")
+                message_queue.task_done()
+    except Exception as e:
+        logger.error(f"Error in message queue processing thread: {e}")
+    
+    queue_processing = False
+    logger.info("Message queue processing thread finished")
 
 def check_new_releases():
     """Check for new releases from followed artists"""
@@ -286,6 +353,7 @@ def check_new_releases():
     
     # Get list of followed artists
     followed_artists = get_followed_artists()
+    new_releases_found = 0
     
     for artist in followed_artists:
         artist_id = artist['id']
@@ -308,8 +376,10 @@ def check_new_releases():
                 is_new = not last_known_release or release['name'] != last_known_release['name']
                 
                 if is_new:
-                    # Send message about new release
+                    # Add release to the posting queue
                     if send_to_telegram(artist, release):
+                        new_releases_found += 1
+                        
                         # Update information about last release
                         if artist_id not in last_releases:
                             last_releases[artist_id] = {}
@@ -325,7 +395,7 @@ def check_new_releases():
     
     # Save data about last releases
     save_last_releases(last_releases)
-    logger.info("New releases check completed")
+    logger.info(f"New releases check completed. Found {new_releases_found} new releases.")
 
 def run_bot():
     """Run bot on schedule"""
@@ -346,7 +416,7 @@ if __name__ == "__main__":
     # Check for all required environment variables
     required_env_vars = [
         'SPOTIFY_CLIENT_ID',
-        'SPOTIFY_CLIENT_SECRET',
+        'SPOTIFY_CLIENT_SECRET', 
         'TELEGRAM_BOT_TOKEN',
         'TELEGRAM_CHANNEL_ID'
     ]
