@@ -22,7 +22,8 @@ except ImportError:
     # If config file is not found, use environment variables directly
     SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
     SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
-    SPOTIFY_REDIRECT_URI = os.environ.get('SPOTIFY_REDIRECT_URI', 'http://localhost:8888/callback')
+    SPOTIFY_REDIRECT_URI = os.environ.get('SPOTIFY_REDIRECT_URI', 'https://spotify-refresh-token-generator.netlify.app/callback')
+    SPOTIFY_REFRESH_TOKEN = os.environ.get('SPOTIFY_REFRESH_TOKEN')
     TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
     TELEGRAM_CHANNEL_ID = os.environ.get('TELEGRAM_CHANNEL_ID')
     CHECK_INTERVAL_HOURS = int(os.environ.get('CHECK_INTERVAL_HOURS', '12'))
@@ -58,14 +59,39 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Initialize Spotify API
-sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-    client_id=SPOTIFY_CLIENT_ID,
-    client_secret=SPOTIFY_CLIENT_SECRET,
-    redirect_uri=SPOTIFY_REDIRECT_URI,
-    scope="user-follow-read",
-    cache_path=".spotify_cache"
-))
+# Initialize Spotify API with refresh token support
+try:
+    SPOTIFY_REFRESH_TOKEN = os.environ.get('SPOTIFY_REFRESH_TOKEN')
+    
+    if SPOTIFY_REFRESH_TOKEN:
+        # Use refresh token for authorization
+        logger.info("Using refresh token for Spotify authentication")
+        auth_manager = SpotifyOAuth(
+            client_id=SPOTIFY_CLIENT_ID,
+            client_secret=SPOTIFY_CLIENT_SECRET,
+            redirect_uri=SPOTIFY_REDIRECT_URI,
+            scope="user-follow-read",
+            cache_path=".spotify_cache"
+        )
+        
+        # Get access token from refresh token
+        token_info = auth_manager.refresh_access_token(SPOTIFY_REFRESH_TOKEN)
+        sp = spotipy.Spotify(auth=token_info['access_token'])
+    else:
+        # Standard browser-based authorization (for local development)
+        logger.info("Using standard OAuth flow for Spotify authentication")
+        sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
+            client_id=SPOTIFY_CLIENT_ID,
+            client_secret=SPOTIFY_CLIENT_SECRET,
+            redirect_uri=SPOTIFY_REDIRECT_URI,
+            scope="user-follow-read",
+            cache_path=".spotify_cache"
+        ))
+    
+    logger.info("Spotify API initialized successfully")
+except Exception as e:
+    logger.error(f"Error initializing Spotify API: {e}")
+    raise
 
 # Initialize Telegram bot
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
@@ -101,33 +127,37 @@ def get_artist_genres(artist_id):
 def get_followed_artists():
     """Get list of followed artists on Spotify"""
     followed_artists = []
-    results = sp.current_user_followed_artists(limit=50)
-    
-    while results:
-        for item in results['artists']['items']:
-            artist_data = {
-                'id': item['id'],
-                'name': item['name'],
-                'uri': item['uri']
-            }
-            
-            # Get genres if needed
-            if INCLUDE_GENRES:
-                artist_data['genres'] = item.get('genres', [])
-                
-                # If genres were not obtained from the followed artists list,
-                # request them directly
-                if not artist_data['genres']:
-                    artist_data['genres'] = get_artist_genres(item['id'])
-            
-            followed_artists.append(artist_data)
+    try:
+        results = sp.current_user_followed_artists(limit=50)
         
-        if results['artists']['next']:
-            results = sp.next(results['artists'])
-        else:
-            results = None
+        while results:
+            for item in results['artists']['items']:
+                artist_data = {
+                    'id': item['id'],
+                    'name': item['name'],
+                    'uri': item['uri']
+                }
+                
+                # Get genres if needed
+                if INCLUDE_GENRES:
+                    artist_data['genres'] = item.get('genres', [])
+                    
+                    # If genres were not obtained from the followed artists list,
+                    # request them directly
+                    if not artist_data['genres']:
+                        artist_data['genres'] = get_artist_genres(item['id'])
+                
+                followed_artists.append(artist_data)
+            
+            if results['artists']['next']:
+                results = sp.next(results['artists'])
+            else:
+                results = None
+        
+        logger.info(f"Found {len(followed_artists)} followed artists")
+    except Exception as e:
+        logger.error(f"Error getting followed artists: {e}")
     
-    logger.info(f"Found {len(followed_artists)} followed artists")
     return followed_artists
 
 def get_artist_releases(artist_id, last_check_date=None):
@@ -137,29 +167,32 @@ def get_artist_releases(artist_id, last_check_date=None):
         last_check_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
     
     albums = []
-    results = sp.artist_albums(artist_id, album_type='album,single', limit=50)
-    
-    while results:
-        for album in results['items']:
-            # Check that the album was released after the last check date
-            release_date = album['release_date']
-            if release_date >= last_check_date:
-                # Get additional information about the release
-                album_info = {
-                    'name': album['name'],
-                    'type': album['album_type'],
-                    'release_date': release_date,
-                    'url': album['external_urls']['spotify'],
-                    'image_url': album['images'][0]['url'] if album['images'] else None,
-                    'total_tracks': album.get('total_tracks', 0)
-                }
-                
-                albums.append(album_info)
+    try:
+        results = sp.artist_albums(artist_id, album_type='album,single', limit=50)
         
-        if results['next']:
-            results = sp.next(results)
-        else:
-            results = None
+        while results:
+            for album in results['items']:
+                # Check that the album was released after the last check date
+                release_date = album['release_date']
+                if release_date >= last_check_date:
+                    # Get additional information about the release
+                    album_info = {
+                        'name': album['name'],
+                        'type': album['album_type'],
+                        'release_date': release_date,
+                        'url': album['external_urls']['spotify'],
+                        'image_url': album['images'][0]['url'] if album['images'] else None,
+                        'total_tracks': album.get('total_tracks', 0)
+                    }
+                    
+                    albums.append(album_info)
+            
+            if results['next']:
+                results = sp.next(results)
+            else:
+                results = None
+    except Exception as e:
+        logger.error(f"Error getting artist releases: {e}")
     
     return albums
 
