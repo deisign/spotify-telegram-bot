@@ -11,6 +11,7 @@ import threading
 import queue
 import random
 import re
+import traceback
 
 # Configure logging
 logging.basicConfig(
@@ -21,7 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Load environment variables from Railway
-logger.info("Loading environment variables from Railway")
+logger.info("Loading environment variables")
 SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 SPOTIFY_REDIRECT_URI = os.environ.get('SPOTIFY_REDIRECT_URI', 'https://spotify-refresh-token-generator.netlify.app/callback')
@@ -117,6 +118,84 @@ except Exception as e:
 
 # Initialize Telegram bot
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+
+def check_telegram_permissions():
+    """Проверяет права бота в канале Telegram"""
+    try:
+        logger.info(f"Checking bot permissions for channel ID: {TELEGRAM_CHANNEL_ID}")
+        
+        # Получаем информацию о канале
+        chat_info = bot.get_chat(TELEGRAM_CHANNEL_ID)
+        logger.info(f"Channel info: Type={chat_info.type}, Title={getattr(chat_info, 'title', 'N/A')}")
+        
+        # Проверяем, является ли бот администратором канала
+        if chat_info.type in ['group', 'supergroup', 'channel']:
+            try:
+                # Получаем информацию о боте в этом чате
+                bot_member = bot.get_chat_member(TELEGRAM_CHANNEL_ID, bot.get_me().id)
+                logger.info(f"Bot status in channel: {bot_member.status}")
+                
+                # Проверяем наличие администраторских прав
+                if bot_member.status in ['administrator', 'creator']:
+                    if hasattr(bot_member, 'can_post_messages'):
+                        logger.info(f"Can post messages: {bot_member.can_post_messages}")
+                    if hasattr(bot_member, 'can_edit_messages'):
+                        logger.info(f"Can edit messages: {bot_member.can_edit_messages}")
+                    if hasattr(bot_member, 'can_delete_messages'):
+                        logger.info(f"Can delete messages: {bot_member.can_delete_messages}")
+                    if hasattr(bot_member, 'can_restrict_members'):
+                        logger.info(f"Can restrict members: {bot_member.can_restrict_members}")
+                    if hasattr(bot_member, 'can_promote_members'):
+                        logger.info(f"Can promote members: {bot_member.can_promote_members}")
+                    if hasattr(bot_member, 'can_change_info'):
+                        logger.info(f"Can change info: {bot_member.can_change_info}")
+                    if hasattr(bot_member, 'can_invite_users'):
+                        logger.info(f"Can invite users: {bot_member.can_invite_users}")
+                    if hasattr(bot_member, 'can_pin_messages'):
+                        logger.info(f"Can pin messages: {bot_member.can_pin_messages}")
+                else:
+                    logger.warning(f"Bot is not an administrator or creator in this channel. Current status: {bot_member.status}")
+                    logger.warning("The bot may not have permission to create polls, consider making it an administrator.")
+            except Exception as e:
+                logger.error(f"Error getting bot member info: {e}")
+        
+        # Проверяем возможность отправки сообщения
+        test_msg = None
+        try:
+            logger.info("Testing message sending...")
+            test_msg = bot.send_message(TELEGRAM_CHANNEL_ID, "Testing bot permissions...", disable_notification=True)
+            logger.info("Message sent successfully")
+            
+            # Проверяем возможность создания опроса
+            logger.info("Testing poll creation...")
+            test_poll = bot.send_poll(
+                chat_id=TELEGRAM_CHANNEL_ID,
+                question="Test poll (will be deleted)",
+                options=["Option 1", "Option 2"],
+                is_anonymous=False,
+                disable_notification=True
+            )
+            logger.info("Poll created successfully")
+            
+            # Удаляем тестовые сообщения
+            bot.delete_message(TELEGRAM_CHANNEL_ID, test_poll.message_id)
+            bot.delete_message(TELEGRAM_CHANNEL_ID, test_msg.message_id)
+            logger.info("Test messages deleted successfully")
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error testing bot capabilities: {e}")
+            # Пытаемся удалить тестовое сообщение, если оно было отправлено
+            if test_msg:
+                try:
+                    bot.delete_message(TELEGRAM_CHANNEL_ID, test_msg.message_id)
+                except:
+                    pass
+            return False
+    
+    except Exception as e:
+        logger.error(f"Error checking Telegram permissions: {e}")
+        return False
 
 def convert_to_hashtag(text):
     """Convert text to hashtag format"""
@@ -216,7 +295,7 @@ def get_followed_artists():
     return followed_artists
 
 def get_artist_releases(artist_id, last_check_date=None):
-    """Get artist releases since last check date"""
+    """Get artist releases since last check date with improved filtering"""
     if not last_check_date:
         # If last check date is not specified, check releases for the configured days
         last_check_date = (datetime.now() - timedelta(days=INITIAL_CHECK_DAYS)).strftime('%Y-%m-%d')
@@ -227,32 +306,89 @@ def get_artist_releases(artist_id, last_check_date=None):
         # Make sure we have a valid Spotify client
         global sp
         try:
-            results = sp.artist_albums(artist_id, album_type='album,single', limit=50)
+            # Получаем альбомы, используя параметр include_groups вместо album_type
+            results = sp.artist_albums(
+                artist_id, 
+                include_groups='album,single', 
+                limit=50,
+                country='US'  # Указываем конкретную страну для более точных результатов
+            )
         except spotipy.client.SpotifyException as se:
             # If token expired, reinitialize Spotify client
             if se.http_status == 401:
                 logger.warning("Token expired, refreshing Spotify client")
                 sp = initialize_spotify()
-                results = sp.artist_albums(artist_id, album_type='album,single', limit=50)
+                results = sp.artist_albums(
+                    artist_id, 
+                    include_groups='album,single', 
+                    limit=50,
+                    country='US'
+                )
             else:
                 raise
         
         while results:
             for album in results['items']:
+                # Проверяем, что этот артист действительно главный исполнитель альбома
+                is_primary_artist = False
+                for album_artist in album['artists']:
+                    if album_artist['id'] == artist_id:
+                        is_primary_artist = True
+                        break
+                
+                if not is_primary_artist:
+                    logger.info(f"Skipping album {album['name']} because {artist_id} is not a primary artist")
+                    continue
+                
                 # Check that the album was released after the last check date
                 release_date = album['release_date']
                 if release_date >= last_check_date:
-                    # Get additional information about the release
-                    album_info = {
-                        'name': album['name'],
-                        'type': album['album_type'],
-                        'release_date': release_date,
-                        'url': album['external_urls']['spotify'],
-                        'image_url': album['images'][0]['url'] if album['images'] else None,
-                        'total_tracks': album.get('total_tracks', 0)
-                    }
-                    
-                    albums.append(album_info)
+                    # Получаем полную информацию об альбоме для дополнительной проверки
+                    try:
+                        full_album = sp.album(album['id'])
+                        
+                        # Дополнительная проверка: убедимся, что артист присутствует хотя бы в одном треке
+                        artist_in_tracks = False
+                        track_items = full_album['tracks']['items']
+                        for track in track_items:
+                            for track_artist in track['artists']:
+                                if track_artist['id'] == artist_id:
+                                    artist_in_tracks = True
+                                    break
+                            if artist_in_tracks:
+                                break
+                        
+                        if not artist_in_tracks and len(track_items) > 0:
+                            logger.warning(f"Skipping album {album['name']} because {artist_id} not found in any tracks")
+                            continue
+                        
+                        # Get additional information about the release
+                        album_info = {
+                            'id': album['id'],  # Добавляем ID для лучшей идентификации
+                            'name': album['name'],
+                            'type': album['album_type'],
+                            'release_date': release_date,
+                            'url': album['external_urls']['spotify'],
+                            'image_url': album['images'][0]['url'] if album['images'] else None,
+                            'total_tracks': album.get('total_tracks', 0)
+                        }
+                        
+                        albums.append(album_info)
+                        
+                    except Exception as album_error:
+                        logger.error(f"Error getting full album info: {album_error}")
+                        # Если не удалось получить полную информацию, добавляем частичную
+                        album_info = {
+                            'id': album['id'],
+                            'name': album['name'],
+                            'type': album['album_type'],
+                            'release_date': release_date,
+                            'url': album['external_urls']['spotify'],
+                            'image_url': album['images'][0]['url'] if album['images'] else None,
+                            'total_tracks': album.get('total_tracks', 0)
+                        }
+                        
+                        albums.append(album_info)
             
             if results['next']:
                 results = sp.next(results)
@@ -351,26 +487,57 @@ def process_message_queue():
                         # Wait a moment before posting poll
                         time.sleep(2)
                         
+                        # Проверяем, действительно ли канал существует
+                        chat_info = bot.get_chat(TELEGRAM_CHANNEL_ID)
+                        logger.info(f"Attempting to create poll in chat: {chat_info.title} (ID: {TELEGRAM_CHANNEL_ID})")
+                        
+                        # Создаем короткий вопрос для опроса (ограничение Telegram)
                         poll_message = f"{message_data['artist_name']} - {message_data['release_name']}"
-                        if len(poll_message) > 100:
-                            # Telegram poll question length limit
-                            poll_message = poll_message[:97] + "..."
+                        if len(poll_message) > 80:  # Уменьшаем до 80 символов (с запасом)
+                            poll_message = poll_message[:77] + "..."
                         
                         poll_question = f"{POLL_QUESTION} {poll_message}"
                         
-                        # Create poll with explicit chat_id
-                        poll = bot.send_poll(
-                            chat_id=TELEGRAM_CHANNEL_ID,
-                            question=poll_question,
-                            options=POLL_OPTIONS,
-                            is_anonymous=POLL_IS_ANONYMOUS,
-                            allows_multiple_answers=False
-                        )
+                        # Логируем содержимое опроса для отладки
+                        logger.info(f"Poll question: {poll_question}")
+                        logger.info(f"Poll options: {POLL_OPTIONS}")
                         
-                        logger.info(f"Poll created for release: {message_data['artist_name']} - {message_data['release_name']}")
+                        # Создаем опрос с развернутыми параметрами для лучшей отладки
+                        try:
+                            poll = bot.send_poll(
+                                chat_id=TELEGRAM_CHANNEL_ID,
+                                question=poll_question,
+                                options=POLL_OPTIONS,
+                                is_anonymous=POLL_IS_ANONYMOUS,
+                                allows_multiple_answers=False,
+                                # Добавляем disable_notification, чтобы уменьшить 
+                                # количество уведомлений у пользователей
+                                disable_notification=True
+                            )
+                            logger.info(f"Poll successfully created with ID: {poll.poll.id}")
+                        except telebot.apihelper.ApiException as api_error:
+                            # Выводим полную информацию об ошибке API
+                            logger.error(f"Telegram API error creating poll: {api_error}")
+                            logger.error(f"Error details: {api_error.result if hasattr(api_error, 'result') else 'No details'}")
+                            
+                            # Пробуем создать упрощенный опрос без дополнительных параметров
+                            try:
+                                logger.info("Attempting to create simplified poll...")
+                                simple_poll = bot.send_poll(
+                                    chat_id=TELEGRAM_CHANNEL_ID,
+                                    question="Rate this release:",
+                                    options=["1", "2", "3", "4", "5"],
+                                    is_anonymous=False
+                                )
+                                logger.info("Simplified poll created successfully")
+                            except Exception as simple_error:
+                                logger.error(f"Even simplified poll failed: {simple_error}")
+                        
                     except Exception as poll_error:
                         logger.error(f"Error creating poll: {poll_error}")
+                        # Выводим полную информацию об ошибке включая тип и трассировку
                         logger.error(f"Poll error details - Type: {type(poll_error)}, Args: {poll_error.args}")
+                        logger.error(f"Traceback: {traceback.format_exc()}")
                 
                 # Mark message as processed
                 message_queue.task_done()
@@ -392,7 +559,7 @@ def process_message_queue():
     logger.info("Message queue processing thread finished")
 
 def check_new_releases():
-    """Check for new releases from followed artists"""
+    """Check for new releases from followed artists with improved duplicate detection"""
     logger.info("Starting new releases check")
     
     # Make sure we have a valid Spotify client
@@ -420,6 +587,9 @@ def check_new_releases():
     followed_artists = get_followed_artists()
     new_releases_found = 0
     
+    # Создаем множество для отслеживания уже обработанных релизов
+    processed_release_ids = set()
+    
     for artist in followed_artists:
         artist_id = artist['id']
         artist_name = artist['name']
@@ -431,26 +601,72 @@ def check_new_releases():
         releases = get_artist_releases(artist_id, last_check_date)
         
         if releases:
-            logger.info(f"Found {len(releases)} new releases for artist {artist_name}")
+            logger.info(f"Found {len(releases)} potential new releases for artist {artist_name}")
             
-            # Get last known release
-            last_known_release = last_releases.get(artist_id, {}).get('last_release', None)
+            # Сначала сортируем релизы по дате (новейшие в начале)
+            releases.sort(key=lambda x: x['release_date'], reverse=True)
+            
+            # Get known releases for this artist
+            known_releases = last_releases.get(artist_id, {}).get('known_releases', [])
             
             for release in releases:
-                # Check if the release is new
-                is_new = not last_known_release or release['name'] != last_known_release['name']
+                release_id = release['id']
+                
+                # Проверяем, не обрабатывали ли мы уже этот релиз в текущем запуске
+                if release_id in processed_release_ids:
+                    logger.info(f"Skipping already processed release ID: {release_id}")
+                    continue
+                
+                # Отмечаем релиз как обработанный
+                processed_release_ids.add(release_id)
+                
+                # Проверяем, не знаем ли мы уже об этом релизе
+                is_new = release_id not in known_releases
                 
                 if is_new:
-                    # Add release to the posting queue
-                    if send_to_telegram(artist, release):
-                        new_releases_found += 1
-                        
-                        # Update information about last release
-                        if artist_id not in last_releases:
-                            last_releases[artist_id] = {}
-                        
-                        last_releases[artist_id]['last_release'] = release
-                        last_releases[artist_id]['last_check_date'] = today
+                    # Добавим дополнительную проверку - проверим название на соответствие спискам или сборникам
+                    release_name = release['name'].lower()
+                    skip_keywords = ['various artists', 'compilation', 'the best of', 'greatest hits']
+                    
+                    should_skip = False
+                    for keyword in skip_keywords:
+                        if keyword in release_name:
+                            # Для таких релизов требуем точного совпадения ID артиста
+                            logger.warning(f"Potential compilation detected: {release['name']}. Performing additional checks.")
+                            should_skip = True
+                            break
+                    
+                    if should_skip:
+                        # Для сборников делаем дополнительную проверку
+                        try:
+                            full_album = sp.album(release_id)
+                            primary_artists = [artist['id'] for artist in full_album['artists']]
+                            
+                            if artist_id in primary_artists:
+                                # Артист действительно основной для этого релиза
+                                should_skip = False
+                                logger.info(f"Compilation confirmed to be by this artist: {release['name']}")
+                            else:
+                                logger.warning(f"Skipping compilation not primarily by this artist: {release['name']}")
+                        except Exception as check_error:
+                            logger.error(f"Error during additional compilation check: {check_error}")
+                    
+                    if not should_skip:
+                        # Add release to the posting queue
+                        if send_to_telegram(artist, release):
+                            new_releases_found += 1
+                            
+                            # Update information about last releases
+                            if artist_id not in last_releases:
+                                last_releases[artist_id] = {}
+                            
+                            # Обновляем список известных релизов
+                            if 'known_releases' not in last_releases[artist_id]:
+                                last_releases[artist_id]['known_releases'] = []
+                            
+                            last_releases[artist_id]['known_releases'].append(release_id)
+                            last_releases[artist_id]['last_release'] = release
+                            last_releases[artist_id]['last_check_date'] = today
         else:
             # Update last check date
             if artist_id in last_releases:
@@ -465,6 +681,11 @@ def check_new_releases():
 def run_bot():
     """Run bot on schedule"""
     logger.info("Starting Spotify to Telegram bot")
+    
+    # Проверяем права бота
+    telegram_ok = check_telegram_permissions()
+    if not telegram_ok:
+        logger.warning("Telegram permissions check failed. The bot may not function correctly.")
     
     # Schedule new releases check with specified interval
     schedule.every(CHECK_INTERVAL_HOURS).hours.do(check_new_releases)
@@ -493,8 +714,4 @@ if __name__ == "__main__":
         exit(1)
     
     try:
-        run_bot()
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"An error occurred: {e}")
+        run_
