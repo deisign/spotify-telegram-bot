@@ -712,24 +712,12 @@ if __name__ == "__main__":
     if missing_vars:
         logger.error(f"Missing required environment variables: {',
 if __name__ == "__main__":
-    # Check for all required environment variables
-    required_env_vars = [
-        'SPOTIFY_CLIENT_ID',
-        'SPOTIFY_CLIENT_SECRET', 
-        'TELEGRAM_BOT_TOKEN',
-        'TELEGRAM_CHANNEL_ID'
-    ]
-    
+    required_env_vars = ['SPOTIFY_CLIENT_ID', 'SPOTIFY_CLIENT_SECRET', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHANNEL_ID']
     missing_vars = [var for var in required_env_vars if not os.environ.get(var)]
-    
     if missing_vars:
-        logger.error("Missing required environment variables: " + ", ".join(missing_vars))
+        logger.error("Missing required environment variables")
         exit(1)
-    
     try:
         run_bot()
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
     except Exception as e:
-        logger.error("An error occurred: " + str(e))
-        logger.error(traceback.format_exc())
+        logger.error("Error occurred")
