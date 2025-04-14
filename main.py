@@ -307,23 +307,23 @@ def get_artist_releases(artist_id, last_check_date=None):
         global sp
         try:
             # Получаем альбомы, используя параметр include_groups вместо album_type
-            results = sp.artist_albums(
-                artist_id, 
-                include_groups='album,single', 
-                limit=50,
-                country='US'  # Указываем конкретную страну для более точных результатов
-            )
+           results = sp.artist_albums(
+    artist_id, 
+    album_type='album,single',  # Заменено include_groups на album_type
+    limit=50,
+    country='US'
+)
         except spotipy.client.SpotifyException as se:
             # If token expired, reinitialize Spotify client
             if se.http_status == 401:
                 logger.warning("Token expired, refreshing Spotify client")
                 sp = initialize_spotify()
-                results = sp.artist_albums(
-                    artist_id, 
-                    include_groups='album,single', 
-                    limit=50,
-                    country='US'
-                )
+               results = sp.artist_albums(
+    artist_id, 
+    album_type='album,single',  # Заменено include_groups на album_type
+    limit=50,
+    country='US'
+)
             else:
                 raise
         
