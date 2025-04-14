@@ -20,8 +20,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-logger.info("Loading environment variables")
+# Load environment variables from Railway
+logger.info("Loading environment variables from Railway")
 SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 SPOTIFY_REDIRECT_URI = os.environ.get('SPOTIFY_REDIRECT_URI', 'https://spotify-refresh-token-generator.netlify.app/callback')
@@ -73,33 +73,43 @@ MESSAGE_TEMPLATE = """*{artist_name}*
 🎧 [Listen on Spotify]({release_url})"""
 
 # Initialize Spotify API
-try:
-    logger.info("Initializing Spotify API")
-    
-    if SPOTIFY_REFRESH_TOKEN:
-        # Use refresh token for authorization
-        logger.info("Using refresh token for Spotify authentication")
-        auth_manager = SpotifyOAuth(
-            client_id=SPOTIFY_CLIENT_ID,
-            client_secret=SPOTIFY_CLIENT_SECRET,
-            redirect_uri=SPOTIFY_REDIRECT_URI,
-            scope="user-follow-read"
-        )
+def initialize_spotify():
+    """Initialize Spotify API with proper token handling"""
+    try:
+        logger.info("Initializing Spotify API")
         
-        # Get access token from refresh token
-        token_info = auth_manager.refresh_access_token(SPOTIFY_REFRESH_TOKEN)
-        sp = spotipy.Spotify(auth=token_info['access_token'])
-    else:
-        # Standard browser-based authorization (for local development)
-        logger.info("Using standard OAuth flow for Spotify authentication")
-        auth_manager = SpotifyOAuth(
-            client_id=SPOTIFY_CLIENT_ID,
-            client_secret=SPOTIFY_CLIENT_SECRET,
-            redirect_uri=SPOTIFY_REDIRECT_URI,
-            scope="user-follow-read"
-        )
-        sp = spotipy.Spotify(auth_manager=auth_manager)
-    
+        if SPOTIFY_REFRESH_TOKEN:
+            # Use refresh token for authorization
+            logger.info("Using refresh token for Spotify authentication")
+            auth_manager = SpotifyOAuth(
+                client_id=SPOTIFY_CLIENT_ID,
+                client_secret=SPOTIFY_CLIENT_SECRET,
+                redirect_uri=SPOTIFY_REDIRECT_URI,
+                scope="user-follow-read"
+            )
+            
+            # Get access token from refresh token
+            token_info = auth_manager.refresh_access_token(SPOTIFY_REFRESH_TOKEN)
+            return spotipy.Spotify(auth=token_info['access_token'])
+        else:
+            # Standard OAuth flow (for development environments)
+            logger.info("Using standard OAuth flow for Spotify authentication")
+            auth_manager = SpotifyOAuth(
+                client_id=SPOTIFY_CLIENT_ID,
+                client_secret=SPOTIFY_CLIENT_SECRET,
+                redirect_uri=SPOTIFY_REDIRECT_URI,
+                scope="user-follow-read",
+                open_browser=False  # Important for server environments
+            )
+            return spotipy.Spotify(auth_manager=auth_manager)
+        
+    except Exception as e:
+        logger.error(f"Error initializing Spotify API: {e}")
+        raise
+
+# Get a fresh Spotify client
+try:
+    sp = initialize_spotify()
     logger.info("Spotify API initialized successfully")
 except Exception as e:
     logger.error(f"Error initializing Spotify API: {e}")
@@ -140,7 +150,19 @@ def save_last_releases(data):
 def get_artist_genres(artist_id):
     """Get artist genres"""
     try:
-        artist_info = sp.artist(artist_id)
+        # Make sure we have a valid Spotify client
+        global sp
+        try:
+            artist_info = sp.artist(artist_id)
+        except spotipy.client.SpotifyException as se:
+            # If token expired, reinitialize Spotify client
+            if se.http_status == 401:
+                logger.warning("Token expired, refreshing Spotify client")
+                sp = initialize_spotify()
+                artist_info = sp.artist(artist_id)
+            else:
+                raise
+                
         return artist_info.get('genres', [])
     except Exception as e:
         logger.error(f"Error getting artist genres: {e}")
@@ -150,7 +172,18 @@ def get_followed_artists():
     """Get list of followed artists on Spotify"""
     followed_artists = []
     try:
-        results = sp.current_user_followed_artists(limit=50)
+        # Make sure we have a valid Spotify client
+        global sp
+        try:
+            results = sp.current_user_followed_artists(limit=50)
+        except spotipy.client.SpotifyException as se:
+            # If token expired, reinitialize Spotify client
+            if se.http_status == 401:
+                logger.warning("Token expired, refreshing Spotify client")
+                sp = initialize_spotify()
+                results = sp.current_user_followed_artists(limit=50)
+            else:
+                raise
         
         while results:
             for item in results['artists']['items']:
@@ -191,7 +224,18 @@ def get_artist_releases(artist_id, last_check_date=None):
     
     albums = []
     try:
-        results = sp.artist_albums(artist_id, album_type='album,single', limit=50)
+        # Make sure we have a valid Spotify client
+        global sp
+        try:
+            results = sp.artist_albums(artist_id, album_type='album,single', limit=50)
+        except spotipy.client.SpotifyException as se:
+            # If token expired, reinitialize Spotify client
+            if se.http_status == 401:
+                logger.warning("Token expired, refreshing Spotify client")
+                sp = initialize_spotify()
+                results = sp.artist_albums(artist_id, album_type='album,single', limit=50)
+            else:
+                raise
         
         while results:
             for album in results['items']:
@@ -350,6 +394,23 @@ def process_message_queue():
 def check_new_releases():
     """Check for new releases from followed artists"""
     logger.info("Starting new releases check")
+    
+    # Make sure we have a valid Spotify client
+    global sp
+    try:
+        # Test a simple API call to verify token
+        sp.current_user()
+    except spotipy.client.SpotifyException as se:
+        # If token expired, reinitialize Spotify client
+        if se.http_status == 401:
+            logger.warning("Token expired before checking new releases, refreshing Spotify client")
+            sp = initialize_spotify()
+        else:
+            logger.error(f"Spotify API error: {se}")
+            return
+    except Exception as e:
+        logger.error(f"Error testing Spotify API: {e}")
+        return
     
     # Load data about last releases
     last_releases = load_last_releases()
