@@ -9,6 +9,12 @@ import queue
 import threading
 import re
 import schedule
+import re
+
+def escape_markdown_v2(text):
+    escape_chars = r"\\_*[]()~`>#+-=|{}.!\""
+    return re.sub(f"([{re.escape(escape_chars)}])", r"\\\\\\1", text)
+
 
 from datetime import datetime, timedelta
 from requests.exceptions import ReadTimeout
@@ -48,8 +54,8 @@ queue_processing = False
 
 # Format caption
 def build_caption(artist, release):
-    caption = f"*{artist['name']}*\n"
-    caption += f"*{release['name']}*\n"
+    caption = f"*{escape_markdown_v2(artist['name'])}*\n"
+    caption += f"*{escape_markdown_v2(release['name'])}*\n"
     caption += f"{release['release_date']} #{release['type']} {release['total_tracks']} tracks\n"
     if INCLUDE_GENRES and artist.get('genres'):
         hashtags = [f"#{re.sub(r'[^\w\s]', '', g).replace(' ', '_').lower()}" for g in artist['genres'][:MAX_GENRES_TO_SHOW]]
@@ -119,13 +125,13 @@ def process_message_queue():
         try:
             caption = build_caption(artist, release)
             if release['image_url']:
-                msg = bot.send_photo(TELEGRAM_CHANNEL_ID, release['image_url'], caption=caption, parse_mode="Markdown")
+                msg = bot.send_photo(TELEGRAM_CHANNEL_ID, release['image_url'], caption=caption, parse_mode="MarkdownV2")
             else:
-                msg = bot.send_message(TELEGRAM_CHANNEL_ID, caption, parse_mode="Markdown")
+                msg = bot.send_message(TELEGRAM_CHANNEL_ID, caption, parse_mode="MarkdownV2")
             time.sleep(2)
             bot.send_poll(
                 chat_id=TELEGRAM_CHANNEL_ID,
-                question=f"{POLL_QUESTION} {artist['name']} - {release['name'][:40]}",
+                question=f"{POLL_QUESTION} {escape_markdown_v2(artist['name'])} - {escape_markdown_v2(release['name'])[:40]}",
                 options=POLL_OPTIONS,
                 is_anonymous=POLL_IS_ANONYMOUS
             )
