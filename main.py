@@ -6,7 +6,6 @@
 # check_new_releases, send_to_telegram, process_message_queue, run_bot)
 
 # У самому повідомленні для Telegram emoji буде вставлено як рядок:
-message = MESSAGE_TEMPLATE.format(...).replace("{emoji}", "🎧")
 
 # І в шаблоні буде, наприклад:
 MESSAGE_TEMPLATE = """{artist_name}
