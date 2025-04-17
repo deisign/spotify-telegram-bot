@@ -1,163 +1,212 @@
-import os
-import logging
 import time
-import traceback
-import random
-import json
-import queue
-import threading
-import re
-import schedule
-from datetime import datetime, timedelta
+import logging
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import telebot
+from datetime import datetime, timedelta
+import json
+import schedule
+import os
+import threading
+import queue
+import random
+import re
+import traceback
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()]
+)
 logger = logging.getLogger(__name__)
 
-SPOTIFY_CLIENT_ID = os.environ['SPOTIFY_CLIENT_ID']
-SPOTIFY_CLIENT_SECRET = os.environ['SPOTIFY_CLIENT_SECRET']
-SPOTIFY_REDIRECT_URI = os.environ['SPOTIFY_REDIRECT_URI']
-SPOTIFY_REFRESH_TOKEN = os.environ['SPOTIFY_REFRESH_TOKEN']
-TELEGRAM_BOT_TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
-TELEGRAM_CHANNEL_ID = os.environ['TELEGRAM_CHANNEL_ID']
+SPOTIFY_CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET")
+SPOTIFY_REDIRECT_URI = os.environ.get("SPOTIFY_REDIRECT_URI", "https://spotify-refresh-token-generator.netlify.app/callback")
+SPOTIFY_REFRESH_TOKEN = os.environ.get("SPOTIFY_REFRESH_TOKEN")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
+CHECK_INTERVAL_HOURS = int(os.environ.get("CHECK_INTERVAL_HOURS", "3"))
+POST_INTERVAL_MINUTES = int(os.environ.get("POST_INTERVAL_MINUTES", "60"))
+INITIAL_CHECK_DAYS = int(os.environ.get("INITIAL_CHECK_DAYS", "7"))
 
-CHECK_INTERVAL_HOURS = int(os.environ.get('CHECK_INTERVAL_HOURS', '3'))
-POST_INTERVAL_MINUTES = int(os.environ.get('POST_INTERVAL_MINUTES', '60'))
-INITIAL_CHECK_DAYS = int(os.environ.get('INITIAL_CHECK_DAYS', '7'))
+os.environ["SPOTIPY_CLIENT_ID"] = SPOTIFY_CLIENT_ID
+os.environ["SPOTIPY_CLIENT_SECRET"] = SPOTIFY_CLIENT_SECRET
+os.environ["SPOTIPY_REDIRECT_URI"] = SPOTIFY_REDIRECT_URI
 
-INCLUDE_GENRES = True
-MAX_GENRES_TO_SHOW = 5
-ADD_POLL = True
-POLL_QUESTION = "Rate this release:"
-POLL_OPTIONS = ["1", "2", "3", "4", "5"]
-POLL_IS_ANONYMOUS = False
-
-DATA_FILE = 'last_releases.json'
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 message_queue = queue.Queue()
 queue_processing = False
 
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+MESSAGE_TEMPLATE = """{artist_name}
+{release_name}
+{release_date} #{release_type_tag} {total_tracks} tracks
+{genres_hashtags}
+🎧 [Listen on Spotify]({release_url})"""
 
-def escape(text):
-    return re.sub(r'([_*\[\]()~`>#+=|{}.!-])', r'\\\1', text)
+POLL_QUESTION = "Rate this release:"
+POLL_OPTIONS = ["1", "2", "3", "4", "5"]
+POLL_IS_ANONYMOUS = False
+ADD_POLL = True
 
-def convert_to_hashtag(text):
-    return "#" + re.sub(r'[^\w\s]', '', text).replace(' ', '_').lower()
+DATA_FILE = "last_releases.json"
+INCLUDE_GENRES = True
+MAX_GENRES_TO_SHOW = 5
 
 def initialize_spotify():
-    logger.info("Initializing Spotify API")
-    auth = SpotifyOAuth(
+    auth_manager = SpotifyOAuth(
         client_id=SPOTIFY_CLIENT_ID,
         client_secret=SPOTIFY_CLIENT_SECRET,
         redirect_uri=SPOTIFY_REDIRECT_URI,
-        scope="user-follow-read user-library-read"
+        scope="user-follow-read"
     )
-    token = auth.refresh_access_token(SPOTIFY_REFRESH_TOKEN)
-    return spotipy.Spotify(auth=token['access_token'])
+    token_info = auth_manager.refresh_access_token(SPOTIFY_REFRESH_TOKEN)
+    return spotipy.Spotify(auth=token_info["access_token"])
 
 sp = initialize_spotify()
 
+def convert_to_hashtag(text):
+    hashtag = re.sub(r"[^\w\s]", "", text).replace(" ", "_").lower()
+    return f"#{hashtag}"
+
 def load_last_releases():
-    return json.load(open(DATA_FILE)) if os.path.exists(DATA_FILE) else {}
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    return {}
 
 def save_last_releases(data):
-    json.dump(data, open(DATA_FILE, "w"))
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f)
+
+def get_artist_genres(artist_id):
+    try:
+        return sp.artist(artist_id).get("genres", [])
+    except:
+        return []
 
 def get_followed_artists():
-    artists = []
-    result = sp.current_user_followed_artists(limit=50)
-    while result:
-        for a in result['artists']['items']:
-            artists.append({
-                'id': a['id'],
-                'name': a['name'],
-                'genres': a.get('genres', [])
-            })
-        result = sp.next(result['artists']) if result['artists']['next'] else None
-    return artists
+    results = sp.current_user_followed_artists(limit=50)
+    followed_artists = []
+    while results:
+        for item in results["artists"]["items"]:
+            artist = {
+                "id": item["id"],
+                "name": item["name"],
+                "genres": item.get("genres") or get_artist_genres(item["id"])
+            }
+            followed_artists.append(artist)
+        if results["artists"]["next"]:
+            results = sp.next(results["artists"])
+        else:
+            break
+    return followed_artists
 
-def get_artist_releases(artist_id, since_date):
+def date_is_after(release_date, check_date):
+    if len(release_date) == 4:
+        release_date += "-01-01"
+    elif len(release_date) == 7:
+        release_date += "-01"
+    return release_date >= check_date
+
+def get_artist_releases(artist_id, last_check_date=None):
+    if not last_check_date:
+        last_check_date = (datetime.now() - timedelta(days=INITIAL_CHECK_DAYS)).strftime("%Y-%m-%d")
     albums = []
-    result = sp.artist_albums(artist_id, album_type='album,single', country='US', limit=50)
-    for album in result['items']:
-        if album['release_date'] >= since_date:
-            albums.append({
-                'id': album['id'],
-                'name': album['name'],
-                'type': album['album_type'],
-                'release_date': album['release_date'],
-                'url': album['external_urls']['spotify'],
-                'image_url': album['images'][0]['url'] if album['images'] else None,
-                'total_tracks': album.get('total_tracks', 0)
-            })
+    results = sp.artist_albums(artist_id, album_type="album,single", limit=50, country="US")
+    while results:
+        for album in results["items"]:
+            release_date = album["release_date"]
+            if date_is_after(release_date, last_check_date):
+                albums.append({
+                    "id": album["id"],
+                    "name": album["name"],
+                    "type": album["album_type"],
+                    "release_date": release_date,
+                    "url": album["external_urls"]["spotify"],
+                    "image_url": album["images"][0]["url"] if album["images"] else None,
+                    "total_tracks": album.get("total_tracks", 0)
+                })
+        if results["next"]:
+            results = sp.next(results)
+        else:
+            break
     return albums
 
-def build_caption(artist, release):
-    artist_name = escape(artist['name'])
-    release_name = escape(release['name'])
-    rtype = escape(release['type'])
-    date = release['release_date']
-    tracks = str(release['total_tracks'])
-    hashtags = ""
-    if INCLUDE_GENRES and artist.get('genres'):
-        hashtags = " ".join([convert_to_hashtag(g) for g in artist['genres'][:MAX_GENRES_TO_SHOW]])
-    url = escape(release['url'])
-
-    return f"*{artist_name}*\n*{release_name}*\n{date} #{rtype} {tracks} tracks\n{hashtags}\n🎧 [Listen on Spotify]({url})"
-
 def send_to_telegram(artist, release):
-    caption = build_caption(artist, release)
-    try:
-        if release['image_url']:
-            bot.send_photo(TELEGRAM_CHANNEL_ID, release['image_url'], caption=caption, parse_mode="MarkdownV2")
-        else:
-            bot.send_message(TELEGRAM_CHANNEL_ID, caption, parse_mode="MarkdownV2")
-        time.sleep(2)
-        poll_q = f"{POLL_QUESTION} {artist['name']} - {release['name']}"[:80]
-        bot.send_poll(TELEGRAM_CHANNEL_ID, escape(poll_q), POLL_OPTIONS, is_anonymous=POLL_IS_ANONYMOUS)
-    except Exception as e:
-        logger.error(f"Telegram error: {e}")
-        logger.error(traceback.format_exc())
-
-def queue_post(artist, release):
-    message_queue.put((artist, release))
+    genres = artist["genres"][:MAX_GENRES_TO_SHOW]
+    hashtags = " ".join([convert_to_hashtag(g) for g in genres])
+    message = MESSAGE_TEMPLATE.format(
+        artist_name=artist["name"],
+        release_name=release["name"],
+        release_date=release["release_date"],
+        release_type_tag=convert_to_hashtag(release["type"]),
+        total_tracks=release["total_tracks"],
+        genres_hashtags=hashtags,
+        release_url=release["url"]
+    )
+    message_queue.put({
+        "artist": artist,
+        "release": release,
+        "message": message,
+        "image_url": release["image_url"]
+    })
     global queue_processing
     if not queue_processing:
-        threading.Thread(target=process_queue).start()
+        threading.Thread(target=process_message_queue).start()
 
-def process_queue():
+def process_message_queue():
     global queue_processing
     queue_processing = True
     while not message_queue.empty():
-        artist, release = message_queue.get()
-        send_to_telegram(artist, release)
+        item = message_queue.get()
+        try:
+            msg = bot.send_photo(
+                TELEGRAM_CHANNEL_ID,
+                item["image_url"],
+                caption=item["message"],
+                parse_mode="Markdown",
+            )
+            time.sleep(2)
+            poll_msg = f"{item['artist']['name']} - {item['release']['name']}"
+            if len(poll_msg) > 80:
+                poll_msg = poll_msg[:77] + "..."
+            bot.send_poll(
+                TELEGRAM_CHANNEL_ID,
+                question=POLL_QUESTION + " " + poll_msg,
+                options=POLL_OPTIONS,
+                is_anonymous=POLL_IS_ANONYMOUS,
+                disable_notification=True
+            )
+        except Exception as e:
+            logger.error(f"Error sending message: {e}")
         message_queue.task_done()
-        sleep_time = POST_INTERVAL_MINUTES * 60
-        logger.info(f"Waiting {sleep_time} sec before next post")
+        sleep_time = max(60, POST_INTERVAL_MINUTES * 60 + random.randint(-60, 60))
+        logger.info(f"Waiting {sleep_time} seconds before next post...")
         time.sleep(sleep_time)
     queue_processing = False
 
 def check_new_releases():
-    last = load_last_releases()
-    today = datetime.now().strftime('%Y-%m-%d')
-    for artist in get_followed_artists():
-        artist_id = artist['id']
-        last_check = last.get(artist_id, {}).get('last_check_date') or (datetime.now() - timedelta(days=INITIAL_CHECK_DAYS)).strftime('%Y-%m-%d')
-        for release in get_artist_releases(artist_id, last_check):
-            known = last.get(artist_id, {}).get('known_releases', [])
-            if release['id'] not in known:
-                queue_post(artist, release)
-                last.setdefault(artist_id, {}).setdefault('known_releases', []).append(release['id'])
-                last[artist_id]['last_check_date'] = today
-    save_last_releases(last)
-    logger.info(f"Queue size after scan: {message_queue.qsize()}")
+    logger.info("Checking new releases...")
+    last_releases = load_last_releases()
+    today = datetime.now().strftime("%Y-%m-%d")
+    followed = get_followed_artists()
+    for artist in followed:
+        aid = artist["id"]
+        last_check = last_releases.get(aid, {}).get("last_check_date")
+        known_ids = last_releases.get(aid, {}).get("known_releases", [])
+        releases = get_artist_releases(aid, last_check)
+        for r in releases:
+            if r["id"] not in known_ids:
+                send_to_telegram(artist, r)
+                last_releases.setdefault(aid, {}).setdefault("known_releases", []).append(r["id"])
+                last_releases[aid]["last_check_date"] = today
+    save_last_releases(last_releases)
 
 def run_bot():
-    logger.info("Running bot...")
-    schedule.every(CHECK_INTERVAL_HOURS).hours.do(check_new_releases)
+    logger.info(f"Running bot with interval every {CHECK_INTERVAL_HOURS} hour(s)")
     check_new_releases()
+    schedule.every(CHECK_INTERVAL_HOURS).hours.do(check_new_releases)
     while True:
         schedule.run_pending()
         time.sleep(60)
