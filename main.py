@@ -70,7 +70,7 @@ except Exception as e:
 
 POLL_OPTIONS = ["1", "2", "3", "4", "5"]
 POLL_QUESTION = "Rate this release:"
-POLL_IS_ANONYMOUS = False
+POLL_IS_ANONYMOUS = True
 
 MESSAGE_TEMPLATE = """*{artist_name}*
 *{release_name}*
