@@ -352,8 +352,13 @@ def check_new_releases():
         NEXT_CHECK_TIME = datetime.now() + timedelta(hours=CHECK_INTERVAL_HOURS)
         logger.info(f"Check completed. Found {new_releases_found} new releases. Next check at {NEXT_CHECK_TIME.strftime('%Y-%m-%d %H:%M:%S')}")
         
+        # Возвращаем количество найденных релизов
+        return new_releases_found
+        
     except Exception as e:
         logger.error(f"Check for new releases failed: {e}")
+        # В случае ошибки возвращаем -1
+        return -1
 
 # Обработчики команд для Telegram бота
 @bot.message_handler(commands=['queue'])
@@ -433,14 +438,31 @@ def clear_queue(message):
 def manual_check(message):
     """Запустить проверку новых релизов вручную"""
     try:
+        # Отправляем уведомление о начале проверки
         bot.send_message(message.chat.id, "Запуск проверки новых релизов...")
-        logger.info(f"Manual check triggered by user {message.from_user.username} (ID: {message.from_user.id})")
+        logger.info(f"Manual check triggered by user {getattr(message.from_user, 'username', 'Unknown')} (ID: {message.from_user.id})")
         
-        # Запуск проверки в отдельном потоке
-        threading.Thread(target=check_new_releases, daemon=True).start()
+        # Проверяем напрямую вместо запуска отдельного потока
+        try:
+            # Принудительно обновляем токен Spotify перед проверкой
+            global sp
+            sp = initialize_spotify()
+            logger.info("Spotify token refreshed before manual check")
+            
+            # Запускаем проверку
+            check_result = check_new_releases()
+            
+            # Отправляем отчет о результате
+            bot.send_message(message.chat.id, f"Проверка новых релизов завершена. Найдено новых релизов: {check_result}")
+        except Exception as check_error:
+            logger.error(f"Error during manual check: {check_error}")
+            bot.send_message(message.chat.id, f"Ошибка при проверке релизов: {str(check_error)}")
     except Exception as e:
         logger.error(f"Error in manual_check handler: {e}")
-        bot.send_message(message.chat.id, "Ошибка при запуске проверки релизов.")
+        try:
+            bot.send_message(message.chat.id, "Произошла ошибка при запуске проверки релизов.")
+        except:
+            pass
 
 # Команда для помощи
 @bot.message_handler(commands=['help'])
