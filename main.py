@@ -46,7 +46,7 @@ SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "https://example.com/ca
 SPOTIFY_REFRESH_TOKEN = os.getenv("SPOTIFY_REFRESH_TOKEN")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
-CHECK_INTERVAL_HOURS = int(os.getenv("CHECK_INTERVAL_HOURS", 3))
+CHECK_INTERVAL_HOURS = int(os.getenv("CHECK_INTERVAL_HOURS", 3))  # Изменено с 12 на 3 часа
 POST_INTERVAL_MINUTES = int(os.getenv("POST_INTERVAL_MINUTES", 60))
 INITIAL_CHECK_DAYS = int(os.getenv("INITIAL_CHECK_DAYS", 7))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 5))
@@ -256,14 +256,27 @@ def send_to_telegram(artist, release):
             "scheduled_time": datetime.now() + timedelta(minutes=len(QUEUE_LIST) * POST_INTERVAL_MINUTES)
         }
         
+        # Проверка, не добавлен ли релиз уже в очередь (по ID)
+        release_id = release["id"]
+        for item in QUEUE_LIST:
+            if item.get("release_id") == release_id:
+                logger.info(f"Release already in queue: {artist['name']} - {release['name']} (ID: {release_id})")
+                return
+        
+        # Добавляем ID релиза для дополнительной проверки дубликатов
+        queue_item["release_id"] = release_id
+        
         QUEUE.put(queue_item)
         QUEUE_LIST.append(queue_item)  # Добавляем в отслеживаемый список
         
-        logger.info(f"Added to queue: {artist['name']} - {release['name']}. Current queue size: {len(QUEUE_LIST)}")
+        logger.info(f"Added to queue: {artist['name']} - {release['name']} (ID: {release_id}). Current queue size: {len(QUEUE_LIST)}")
         
+        # Принудительная отправка сообщения, если очередь не обрабатывается
         global queue_processing
         if not queue_processing:
-            threading.Thread(target=process_queue, daemon=True).start()
+            logger.info("Starting queue processing thread")
+            processing_thread = threading.Thread(target=process_queue, daemon=True)
+            processing_thread.start()
     except Exception as e:
         logger.error(f"Failed to queue message for Telegram: {e}")
         raise
@@ -278,14 +291,14 @@ def process_queue():
         try:
             # Отправка сообщения с картинкой или без
             if item["image"]:
-                bot.send_photo(
+                sent_message = bot.send_photo(
                     TELEGRAM_CHANNEL_ID, 
                     photo=item["image"], 
                     caption=item["message"], 
                     parse_mode="MarkdownV2"
                 )
             else:
-                bot.send_message(
+                sent_message = bot.send_message(
                     TELEGRAM_CHANNEL_ID, 
                     item["message"], 
                     parse_mode="MarkdownV2"
@@ -313,6 +326,9 @@ def process_queue():
             current_time = datetime.now()
             for i, queued_item in enumerate(QUEUE_LIST):
                 queued_item["scheduled_time"] = current_time + timedelta(minutes=i * POST_INTERVAL_MINUTES)
+            
+            # Дополнительное логирование для проверки
+            logger.info(f"Message sent successfully: {sent_message}")
             
             # Ожидание перед отправкой следующего сообщения
             if not QUEUE.empty():
@@ -351,6 +367,8 @@ def check_new_releases():
         followed_artists = get_followed_artists()
         logger.info(f"Checking releases for {len(followed_artists)} artists")
         
+        new_releases_found = 0
+        
         for artist in followed_artists:
             aid = artist["id"]
             known = last.get(aid, {}).get("known_releases", [])
@@ -361,13 +379,15 @@ def check_new_releases():
             
             try:
                 releases = get_artist_releases(aid, since)
-                logger.info(f"Found {len(releases)} potential new releases for {artist['name']}")
+                if releases:
+                    logger.info(f"Found {len(releases)} potential new releases for {artist['name']}")
                 
                 for release in releases:
                     if release["id"] not in known:
-                        logger.info(f"New release found: {artist['name']} - {release['name']}")
+                        logger.info(f"New release found: {artist['name']} - {release['name']} (ID: {release['id']})")
                         send_to_telegram(artist, release)
                         known.append(release["id"])
+                        new_releases_found += 1
                 
                 last[aid] = {
                     "last_check_date": today,
@@ -381,7 +401,12 @@ def check_new_releases():
         
         # Обновляем время следующей проверки
         NEXT_CHECK_TIME = datetime.now() + timedelta(hours=CHECK_INTERVAL_HOURS)
-        logger.info(f"Check for new releases completed successfully. Next check at {NEXT_CHECK_TIME.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"Check for new releases completed successfully. Found {new_releases_found} new releases. Next check at {NEXT_CHECK_TIME.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Если найдены новые релизы, но очередь не обрабатывается, принудительно запускаем обработчик
+        if new_releases_found > 0 and not queue_processing and len(QUEUE_LIST) > 0:
+            logger.info("Starting queue processing for newly found releases")
+            threading.Thread(target=process_queue, daemon=True).start()
         
     except Exception as e:
         logger.error(f"Check for new releases failed: {e}")
