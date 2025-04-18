@@ -222,21 +222,18 @@ def get_artist_releases(artist_id, since_date):
         logger.error(f"Failed to get releases for artist {artist_id}: {e}")
         raise
 
-@backoff.on_exception(backoff.expo, telebot.apihelper.ApiHTTPException, max_tries=MAX_RETRIES)
+@retry_with_backoff(max_tries=MAX_RETRIES, exceptions=(Exception,))
 def send_to_telegram(artist, release):
     """Send message to Telegram with proper error handling"""
     try:
-        # Подготовка хэштегов с экранированием специальных символов для MarkdownV2
+        # Подготовка хэштегов
         genres = artist.get("genres", [])
         hashtags = " ".join(convert_to_hashtag(g) for g in genres[:5] if g)
         
-        # Экранирование специальных символов для MarkdownV2
-        artist_name = artist["name"].replace("_", "\\_").replace("*", "\\*").replace("[", "\\[").replace("`", "\\`")
-        release_name = release["name"].replace("_", "\\_").replace("*", "\\*").replace("[", "\\[").replace("`", "\\`")
-        
+        # Формирование сообщения
         msg = MESSAGE_TEMPLATE.format(
-            artist_name=artist_name,
-            release_name=release_name,
+            artist_name=artist["name"],
+            release_name=release["name"],
             release_date=release["release_date"],
             release_type_tag=convert_to_hashtag(release["type"]),
             total_tracks=release["total_tracks"],
@@ -272,13 +269,13 @@ def process_queue():
                     TELEGRAM_CHANNEL_ID, 
                     photo=item["image"], 
                     caption=item["message"], 
-                    parse_mode="MarkdownV2"
+                    parse_mode="Markdown"
                 )
             else:
                 bot.send_message(
                     TELEGRAM_CHANNEL_ID, 
                     item["message"], 
-                    parse_mode="MarkdownV2"
+                    parse_mode="Markdown"
                 )
             
             # Отправка опроса
