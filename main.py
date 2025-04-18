@@ -59,11 +59,15 @@ os.environ["SPOTIPY_REDIRECT_URI"] = SPOTIFY_REDIRECT_URI
 # Global
 DATA_FILE = "last_releases.json"
 QUEUE = queue.Queue()
+QUEUE_LIST = []  # Для отслеживания элементов в очереди
 queue_processing = False
 sp = None  # Will be initialized properly
+START_TIME = datetime.now()
+NEXT_CHECK_TIME = None
 
 try:
     bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+    logger.info("Telegram bot initialized successfully")
 except Exception as e:
     logger.error(f"Failed to initialize Telegram bot: {e}")
     sys.exit(1)
@@ -71,12 +75,6 @@ except Exception as e:
 POLL_OPTIONS = ["1", "2", "3", "4", "5"]
 POLL_QUESTION = "Rate this release:"
 POLL_IS_ANONYMOUS = True
-
-MESSAGE_TEMPLATE = """*{artist_name}*
-*{release_name}*
-{release_date} #{release_type_tag} {total_tracks} tracks
-{genres_hashtags}
-🎧 Listen on [Spotify]({release_url})"""
 
 # Собственная реализация экспоненциальной задержки при сбоях API
 def retry_with_backoff(max_tries, exceptions=(Exception,)):
@@ -222,7 +220,51 @@ def get_artist_releases(artist_id, since_date):
         logger.error(f"Failed to get releases for artist {artist_id}: {e}")
         raise
 
-@retry_with_backoff(max_tries=MAX_RETRIES, exceptions=(Exception,))
+def process_queue():
+    """Process message queue with error handling"""
+    global queue_processing
+    queue_processing = True
+    
+    try:
+        while not QUEUE.empty():
+            item = QUEUE.get()
+            try:
+                # Отправка сообщения
+                if item["image"]:
+                    bot.send_photo(TELEGRAM_CHANNEL_ID, photo=item["image"], 
+                                   caption=item["message"], parse_mode="Markdown")
+                else:
+                    bot.send_message(TELEGRAM_CHANNEL_ID, 
+                                     item["message"], parse_mode="Markdown")
+                
+                # Отправка опроса
+                time.sleep(2)
+                poll_q = f"{POLL_QUESTION} {item['artist']} - {item['release']}"
+                bot.send_poll(TELEGRAM_CHANNEL_ID, question=poll_q[:255], 
+                              options=POLL_OPTIONS, is_anonymous=POLL_IS_ANONYMOUS)
+                
+                # Удаляем обработанный элемент из отслеживаемого списка
+                for i, queued_item in enumerate(QUEUE_LIST):
+                    if queued_item.get("id") == item.get("id"):
+                        QUEUE_LIST.pop(i)
+                        break
+                
+                logger.info(f"Sent message for: {item['artist']} - {item['release']}")
+                
+                # Ожидание перед следующим сообщением
+                if not QUEUE.empty():
+                    logger.info(f"Waiting {POST_INTERVAL_MINUTES} minutes before next message")
+                    time.sleep(POST_INTERVAL_MINUTES * 60)
+                    
+            except Exception as e:
+                logger.error(f"Failed to send message: {e}")
+                # Перейти к следующему сообщению при ошибке
+    except Exception as e:
+        logger.error(f"Error in queue processing: {e}")
+    
+    queue_processing = False
+    logger.info("Queue processing completed")
+
 def send_to_telegram(artist, release):
     """Send message to Telegram with proper error handling"""
     try:
@@ -230,97 +272,52 @@ def send_to_telegram(artist, release):
         genres = artist.get("genres", [])
         hashtags = " ".join(convert_to_hashtag(g) for g in genres[:5] if g)
         
-        # Экранирование специальных символов Markdown для безопасного форматирования
-        def escape_markdown(text):
-            # Экранирование символов: _ * [ ] ( ) ~ ` > # + - = | { } . !
-            symbols = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-            for symbol in symbols:
-                text = text.replace(symbol, f'\\{symbol}')
-            return text
+        # Форматирование сообщения
+        msg = f"*{artist['name']}*\n*{release['name']}*\n{release['release_date']} #{release['type']} {release['total_tracks']} tracks\n{hashtags}\n🎧 Listen on [Spotify]({release['url']})"
         
-        # Безопасное форматирование с экранированием специальных символов
-        artist_name = escape_markdown(artist["name"])
-        release_name = escape_markdown(release["name"])
+        # Создаем уникальный ID для элемента очереди
+        item_id = f"{artist['id']}_{release['id']}"
         
-        # Формирование сообщения
-        msg = f"*{artist_name}*\n*{release_name}*\n{release['release_date']} #{convert_to_hashtag(release['type']).replace('#', '')} {release['total_tracks']} tracks\n{hashtags}\n🎧 Listen on [Spotify]({release['url']})"
+        # Проверка на дубликаты в очереди
+        for item in QUEUE_LIST:
+            if item.get("id") == item_id:
+                logger.info(f"Release already in queue: {artist['name']} - {release['name']}")
+                return
         
-        QUEUE.put({
+        queue_item = {
+            "id": item_id,
             "artist": artist["name"],
             "release": release["name"],
             "message": msg,
             "image": release.get("image_url")
-        })
+        }
         
+        QUEUE.put(queue_item)
+        QUEUE_LIST.append(queue_item)
+        
+        logger.info(f"Added to queue: {artist['name']} - {release['name']}. Current queue size: {len(QUEUE_LIST)}")
+        
+        # Запускаем обработчик очереди, если он не запущен
         global queue_processing
         if not queue_processing:
             threading.Thread(target=process_queue, daemon=True).start()
+            logger.info("Started queue processing thread")
+            
     except Exception as e:
         logger.error(f"Failed to queue message for Telegram: {e}")
-        raise
-
-def process_queue():
-    """Process message queue with error handling"""
-    global queue_processing
-    queue_processing = True
-    
-    while not QUEUE.empty():
-        item = QUEUE.get()
-        try:
-            # Отправка сообщения с картинкой или без
-            if item["image"]:
-                bot.send_photo(
-                    TELEGRAM_CHANNEL_ID, 
-                    photo=item["image"], 
-                    caption=item["message"], 
-                    parse_mode="MarkdownV2"
-                )
-            else:
-                bot.send_message(
-                    TELEGRAM_CHANNEL_ID, 
-                    item["message"], 
-                    parse_mode="MarkdownV2"
-                )
-            
-            # Отправка опроса
-            time.sleep(2)  # Небольшая пауза между сообщениями
-            poll_q = f"{POLL_QUESTION} {item['artist']} - {item['release']}"
-            bot.send_poll(
-                TELEGRAM_CHANNEL_ID, 
-                question=poll_q[:255],  # Ограничение длины вопроса
-                options=POLL_OPTIONS, 
-                is_anonymous=POLL_IS_ANONYMOUS
-            )
-            
-            logger.info(f"Successfully sent message for: {item['artist']} - {item['release']}")
-            
-            # Ожидание перед отправкой следующего сообщения
-            if not QUEUE.empty():
-                logger.info(f"Waiting {POST_INTERVAL_MINUTES} minutes before sending next message")
-                time.sleep(POST_INTERVAL_MINUTES * 60)
-                
-        except Exception as e:
-            logger.error(f"Failed to send Telegram message: {e}")
-            # Возвращаем в очередь при ошибке (не более 3 раз)
-            retries = item.get("retries", 0)
-            if retries < 3:
-                item["retries"] = retries + 1
-                logger.info(f"Requeueing message (retry {retries + 1}/3)")
-                QUEUE.put(item)
-                time.sleep(60)  # Ожидание минуту перед повторной попыткой
-    
-    queue_processing = False
-    logger.info("Message queue processing completed")
 
 def check_new_releases():
     """Check for new releases with error handling"""
-    logger.info("Checking new releases...")
+    global NEXT_CHECK_TIME
+    
     try:
         today = datetime.now().strftime("%Y-%m-%d")
         last = load_last_releases()
         
         followed_artists = get_followed_artists()
         logger.info(f"Checking releases for {len(followed_artists)} artists")
+        
+        new_releases_found = 0
         
         for artist in followed_artists:
             aid = artist["id"]
@@ -332,13 +329,15 @@ def check_new_releases():
             
             try:
                 releases = get_artist_releases(aid, since)
-                logger.info(f"Found {len(releases)} potential new releases for {artist['name']}")
+                if releases:
+                    logger.info(f"Found {len(releases)} potential new releases for {artist['name']}")
                 
                 for release in releases:
                     if release["id"] not in known:
-                        logger.info(f"New release found: {artist['name']} - {release['name']}")
+                        logger.info(f"New release found: {artist['name']} - {release['name']} (ID: {release['id']})")
                         send_to_telegram(artist, release)
                         known.append(release["id"])
+                        new_releases_found += 1
                 
                 last[aid] = {
                     "last_check_date": today,
@@ -346,15 +345,110 @@ def check_new_releases():
                 }
             except Exception as e:
                 logger.error(f"Error processing artist {artist['name']}: {e}")
-                # Продолжаем с другими артистами даже при ошибке
         
         save_last_releases(last)
-        logger.info("Check for new releases completed successfully")
+        
+        # Обновляем время следующей проверки
+        NEXT_CHECK_TIME = datetime.now() + timedelta(hours=CHECK_INTERVAL_HOURS)
+        logger.info(f"Check completed. Found {new_releases_found} new releases. Next check at {NEXT_CHECK_TIME.strftime('%Y-%m-%d %H:%M:%S')}")
+        
     except Exception as e:
         logger.error(f"Check for new releases failed: {e}")
 
+# Обработчики команд для Telegram бота
+@bot.message_handler(commands=['queue'])
+def show_queue(message):
+    """Показать текущую очередь релизов"""
+    if not QUEUE_LIST:
+        bot.reply_to(message, "Очередь пуста. Нет запланированных релизов.")
+        return
+    
+    current_time = datetime.now()
+    queue_info = ["*Очередь релизов:*"]
+    
+    for i, item in enumerate(QUEUE_LIST, 1):
+        eta = f"скоро" if i == 1 else f"через ~{i*POST_INTERVAL_MINUTES} мин"
+        queue_info.append(f"{i}. *{item['artist']}* - *{item['release']}* ({eta})")
+    
+    # Отправка сообщения с информацией о очереди
+    bot.reply_to(message, "\n".join(queue_info), parse_mode="Markdown")
+
+# Статус бота и мониторинг
+@bot.message_handler(commands=['status'])
+def show_status(message):
+    """Показать статус бота"""
+    uptime = datetime.now() - START_TIME
+    days = uptime.days
+    hours, remainder = divmod(uptime.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    next_check = NEXT_CHECK_TIME.strftime('%Y-%m-%d %H:%M:%S') if NEXT_CHECK_TIME else 'Не запланирована'
+    
+    status_info = [
+        "*Статус Spotify Telegram бота:*",
+        f"Время работы: {days}d {hours}h {minutes}m {seconds}s",
+        f"Очередь: {len(QUEUE_LIST)} релизов в ожидании",
+        f"Интервал проверки: каждые {CHECK_INTERVAL_HOURS} часов",
+        f"Интервал публикации: каждые {POST_INTERVAL_MINUTES} минут",
+        f"Следующая проверка новых релизов: {next_check}"
+    ]
+    
+    # Отправка сообщения со статусом
+    bot.reply_to(message, "\n".join(status_info), parse_mode="Markdown")
+
+# Команда для очистки очереди
+@bot.message_handler(commands=['clear_queue'])
+def clear_queue(message):
+    """Очистить очередь публикации"""
+    global QUEUE_LIST
+    
+    if not QUEUE_LIST:
+        bot.reply_to(message, "Очередь уже пуста.")
+        return
+    
+    queue_size = len(QUEUE_LIST)
+    
+    # Очистка очереди
+    with QUEUE.mutex:
+        QUEUE.queue.clear()
+    QUEUE_LIST.clear()
+    
+    logger.info(f"Queue cleared by user {message.from_user.username} (ID: {message.from_user.id}). {queue_size} items removed.")
+    bot.reply_to(message, f"Очередь очищена. Удалено {queue_size} релизов из очереди публикации.")
+
+# Команда для ручного запуска проверки новых релизов
+@bot.message_handler(commands=['check_now'])
+def manual_check(message):
+    """Запустить проверку новых релизов вручную"""
+    bot.reply_to(message, "Запуск проверки новых релизов...")
+    logger.info(f"Manual check triggered by user {message.from_user.username} (ID: {message.from_user.id})")
+    
+    # Запуск проверки в отдельном потоке
+    threading.Thread(target=check_new_releases, daemon=True).start()
+
+# Команда для помощи
+@bot.message_handler(commands=['help'])
+def show_help(message):
+    """Показать список доступных команд"""
+    help_text = [
+        "*Доступные команды:*",
+        "/queue - Показать текущую очередь публикации релизов",
+        "/status - Показать статус бота",
+        "/clear_queue - Очистить очередь публикации",
+        "/check_now - Запустить проверку новых релизов",
+        "/help - Показать эту справку"
+    ]
+    
+    bot.reply_to(message, "\n".join(help_text), parse_mode="Markdown")
+
+# Обработчик текстовых сообщений
+@bot.message_handler(func=lambda message: True)
+def echo_message(message):
+    """Обработчик всех остальных сообщений"""
+    bot.reply_to(message, "Используйте /help для просмотра доступных команд.")
+
 def run_bot():
-    """Main bot function with improved error handling"""
+    """Main bot function with simplified and robust architecture"""
     global sp
     
     logger.info("Starting Spotify Telegram Bot")
@@ -368,39 +462,48 @@ def run_bot():
         
         logger.info(f"Bot configured to check every {CHECK_INTERVAL_HOURS} hour(s)")
         
-        # Первая проверка при запуске
-        check_new_releases()
-        
-        # Планировщик регулярных проверок
-        schedule.every(CHECK_INTERVAL_HOURS).hours.do(check_new_releases)
-        
-        # Обновление токена каждые 50 минут (токен действителен 1 час)
-        def refresh_spotify_token():
-            global sp
-            logger.info("Refreshing Spotify token")
+        # Запуск проверки релизов в отдельном потоке
+        def check_releases_periodically():
             try:
-                sp = initialize_spotify()
-                logger.info("Spotify token refreshed successfully")
+                # Первая проверка при запуске
+                logger.info("Running initial check for new releases")
+                check_new_releases()
+                
+                # Периодическая проверка
+                while True:
+                    logger.info(f"Waiting {CHECK_INTERVAL_HOURS} hours until next check")
+                    time.sleep(CHECK_INTERVAL_HOURS * 3600)
+                    logger.info("Running scheduled check for new releases")
+                    check_new_releases()
             except Exception as e:
-                logger.error(f"Failed to refresh Spotify token: {e}")
+                logger.error(f"Error in check thread: {e}")
         
-        schedule.every(50).minutes.do(refresh_spotify_token)
+        # Запуск потока периодической проверки релизов
+        check_thread = threading.Thread(target=check_releases_periodically, daemon=True)
+        check_thread.start()
+        logger.info("Started release check thread")
         
-        logger.info("Bot is running. Press Ctrl+C to stop.")
+        # Обновление токена Spotify каждые 50 минут
+        def refresh_token_periodically():
+            try:
+                while True:
+                    time.sleep(50 * 60)  # 50 минут
+                    logger.info("Refreshing Spotify token")
+                    global sp
+                    sp = initialize_spotify()
+                    logger.info("Spotify token refreshed")
+            except Exception as e:
+                logger.error(f"Error in token refresh thread: {e}")
         
-        # Основной цикл с обработкой прерывания
-        try:
-            while True:
-                schedule.run_pending()
-                time.sleep(60)
-        except KeyboardInterrupt:
-            logger.info("Bot stopped by user")
-        except Exception as e:
-            logger.error(f"Unexpected error in main loop: {e}")
-            # Перезапуск цикла после непредвиденной ошибки
-            time.sleep(60)
-            run_bot()
-            
+        # Запуск потока обновления токена
+        token_thread = threading.Thread(target=refresh_token_periodically, daemon=True)
+        token_thread.start()
+        logger.info("Started token refresh thread")
+        
+        # Запуск Telegram бота в основном потоке
+        logger.info("Starting Telegram bot polling")
+        bot.infinity_polling(timeout=60, long_polling_timeout=30)
+        
     except Exception as e:
         logger.error(f"Bot initialization failed: {e}")
 
