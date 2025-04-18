@@ -434,7 +434,7 @@ def clear_queue(message):
         bot.send_message(message.chat.id, "Ошибка при очистке очереди.")
 
 # Команда для ручного запуска проверки новых релизов
-@bot.message_handler(commands=['check_now'])
+@bot.message_handler(commands=['checknow'])
 def manual_check(message):
     """Запустить проверку новых релизов вручную"""
     try:
@@ -442,27 +442,47 @@ def manual_check(message):
         bot.send_message(message.chat.id, "Запуск проверки новых релизов...")
         logger.info(f"Manual check triggered by user {getattr(message.from_user, 'username', 'Unknown')} (ID: {message.from_user.id})")
         
-        # Проверяем напрямую вместо запуска отдельного потока
-        try:
-            # Принудительно обновляем токен Spotify перед проверкой
-            global sp
-            sp = initialize_spotify()
-            logger.info("Spotify token refreshed before manual check")
-            
-            # Запускаем проверку
-            check_result = check_new_releases()
-            
-            # Отправляем отчет о результате
-            bot.send_message(message.chat.id, f"Проверка новых релизов завершена. Найдено новых релизов: {check_result}")
-        except Exception as check_error:
-            logger.error(f"Error during manual check: {check_error}")
-            bot.send_message(message.chat.id, f"Ошибка при проверке релизов: {str(check_error)}")
+        # Запускаем проверку в отдельном потоке, но с прямой обратной связью
+        def run_check_and_reply():
+            try:
+                # Обновляем токен Spotify
+                global sp
+                try:
+                    sp = initialize_spotify()
+                    logger.info("Spotify token refreshed before manual check")
+                except Exception as token_error:
+                    logger.error(f"Failed to refresh token: {token_error}")
+                    # Продолжаем даже при ошибке обновления токена
+                
+                # Запускаем проверку
+                new_releases = check_new_releases()
+                
+                # Отправляем результат обратно пользователю
+                if new_releases > 0:
+                    bot.send_message(message.chat.id, f"Проверка завершена. Найдено {new_releases} новых релизов.")
+                elif new_releases == 0:
+                    bot.send_message(message.chat.id, "Проверка завершена. Новых релизов не найдено.")
+                else:
+                    bot.send_message(message.chat.id, "Проверка завершена с ошибкой. Проверьте логи.")
+            except Exception as check_error:
+                logger.error(f"Error in check thread: {check_error}")
+                try:
+                    bot.send_message(message.chat.id, "Ошибка при проверке релизов. Подробности в логах.")
+                except:
+                    logger.error("Failed to send error message")
+        
+        # Запускаем проверку в отдельном потоке
+        check_thread = threading.Thread(target=run_check_and_reply)
+        check_thread.daemon = True
+        check_thread.start()
+        logger.info("Started manual check thread")
+        
     except Exception as e:
         logger.error(f"Error in manual_check handler: {e}")
         try:
             bot.send_message(message.chat.id, "Произошла ошибка при запуске проверки релизов.")
-        except:
-            pass
+        except Exception as msg_error:
+            logger.error(f"Failed to send error message: {msg_error}")
 
 # Команда для помощи
 @bot.message_handler(commands=['help'])
