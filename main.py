@@ -12,7 +12,7 @@ import random
 import re
 from datetime import datetime, timedelta
 import sys
-import backoff
+import functools
 
 # Logging
 logging.basicConfig(
@@ -78,11 +78,29 @@ MESSAGE_TEMPLATE = """{artist_name}
 {genres_hashtags}
 🎧 Listen on Spotify: {release_url}"""
 
-# Экспоненциальная задержка при сбоях API
-@backoff.on_exception(backoff.expo, 
-                     (spotipy.exceptions.SpotifyException, 
-                      telebot.apihelper.ApiHTTPException),
-                     max_tries=MAX_RETRIES)
+# Собственная реализация экспоненциальной задержки при сбоях API
+def retry_with_backoff(max_tries, exceptions=(Exception,)):
+    """Декоратор для повторных попыток с экспоненциальной задержкой"""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            attempt = 0
+            while attempt < max_tries:
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    attempt += 1
+                    if attempt == max_tries:
+                        logger.error(f"All {max_tries} retry attempts failed")
+                        raise
+                    wait_time = 2 ** attempt  # Экспоненциальная задержка
+                    logger.warning(f"Attempt {attempt} failed with error: {e}. Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+        return wrapper
+    return decorator
+
+@retry_with_backoff(max_tries=MAX_RETRIES, 
+                   exceptions=(spotipy.exceptions.SpotifyException, Exception))
 def initialize_spotify():
     """Initialize Spotify client with proper error handling and retry"""
     try:
@@ -123,7 +141,7 @@ def save_last_releases(data):
     except Exception as e:
         logger.error(f"Failed to save releases data: {e}")
 
-@backoff.on_exception(backoff.expo, spotipy.exceptions.SpotifyException, max_tries=MAX_RETRIES)
+@retry_with_backoff(max_tries=MAX_RETRIES, exceptions=(spotipy.exceptions.SpotifyException, Exception))
 def get_followed_artists():
     """Get list of followed artists with retries for API failures"""
     followed = []
@@ -147,7 +165,7 @@ def get_followed_artists():
         logger.error(f"Failed to get followed artists: {e}")
         raise
 
-@backoff.on_exception(backoff.expo, spotipy.exceptions.SpotifyException, max_tries=MAX_RETRIES)
+@retry_with_backoff(max_tries=MAX_RETRIES, exceptions=(spotipy.exceptions.SpotifyException, Exception))
 def get_artist_releases(artist_id, since_date):
     """Get artist releases with improved date handling and retries"""
     releases = []
