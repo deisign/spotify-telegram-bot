@@ -72,11 +72,11 @@ POLL_OPTIONS = ["1", "2", "3", "4", "5"]
 POLL_QUESTION = "Rate this release:"
 POLL_IS_ANONYMOUS = False
 
-MESSAGE_TEMPLATE = """{artist_name}
-{release_name}
+MESSAGE_TEMPLATE = """*{artist_name}*
+*{release_name}*
 {release_date} #{release_type_tag} {total_tracks} tracks
 {genres_hashtags}
-🎧 Listen on Spotify: {release_url}"""
+🎧 Listen on [Spotify]({release_url})"""
 
 # Собственная реализация экспоненциальной задержки при сбоях API
 def retry_with_backoff(max_tries, exceptions=(Exception,)):
