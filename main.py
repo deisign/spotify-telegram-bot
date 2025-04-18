@@ -566,9 +566,31 @@ def run_bot():
         token_thread.start()
         logger.info("Started token refresh thread")
         
-        # Запуск Telegram бота в основном потоке
+        # Отключаем бесконечное повторение при ошибках и используем явный механизм опроса
         logger.info("Starting Telegram bot polling")
-        bot.infinity_polling(timeout=60, long_polling_timeout=30)
+        
+        # Используем переменную для отслеживания состояния бота
+        bot_running = True
+        
+        # Обертка для деликатной обработки исключений при опросе
+        def safe_polling():
+            nonlocal bot_running
+            try:
+                # Используем non_stop=False для предотвращения автоматического перезапуска
+                # и значительно меньший timeout
+                bot.polling(non_stop=False, interval=0.5, timeout=10)
+            except Exception as e:
+                logger.error(f"Polling error: {e}")
+                # Пауза перед следующей попыткой, чтобы не перегрузить API
+                time.sleep(10)
+                
+            # Если мы дошли до этой точки, значит opros прервался
+            if bot_running:
+                logger.info("Restarting polling after error")
+                safe_polling()  # Рекурсивно перезапускаем опрос
+        
+        # Запускаем обработку в основном потоке
+        safe_polling()
         
     except Exception as e:
         logger.error(f"Bot initialization failed: {e}")
