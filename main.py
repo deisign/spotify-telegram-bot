@@ -533,10 +533,6 @@ def run_bot():
         # Первая проверка при запуске
         check_new_releases()
         
-        # Запуск телеграм бота в отдельном потоке
-        threading.Thread(target=bot.polling, args=(True,), daemon=True).start()
-        logger.info("Telegram bot started and waiting for commands")
-        
         # Планировщик регулярных проверок
         schedule.every(CHECK_INTERVAL_HOURS).hours.do(check_new_releases)
         
@@ -554,6 +550,11 @@ def run_bot():
         
         logger.info("Bot is running. Press Ctrl+C to stop.")
         
+        # Запускаем отдельный поток для обработки сообщений бота
+        polling_thread = threading.Thread(target=start_bot_polling, daemon=True)
+        polling_thread.start()
+        logger.info("Telegram bot polling thread started")
+        
         # Основной цикл с обработкой прерывания
         try:
             while True:
@@ -569,6 +570,19 @@ def run_bot():
             
     except Exception as e:
         logger.error(f"Bot initialization failed: {e}")
+
+def start_bot_polling():
+    """Start polling in a safe way with restart capability"""
+    while True:
+        try:
+            logger.info("Starting Telegram bot polling")
+            bot.infinity_polling(timeout=60, long_polling_timeout=30)
+        except Exception as e:
+            logger.error(f"Polling error: {e}")
+            time.sleep(10)  # Пауза перед повторной попыткой
+        else:
+            # Если функция завершилась без исключения, прерываем цикл
+            break
 
 if __name__ == "__main__":
     # Установка обработчика неперехваченных исключений
