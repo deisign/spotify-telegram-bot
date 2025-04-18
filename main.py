@@ -49,6 +49,7 @@ TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 CHECK_INTERVAL_HOURS = int(os.getenv("CHECK_INTERVAL_HOURS", 3))
 POST_INTERVAL_MINUTES = int(os.getenv("POST_INTERVAL_MINUTES", 60))
 INITIAL_CHECK_DAYS = int(os.getenv("INITIAL_CHECK_DAYS", 7))
+RECENT_CHECK_HOURS = int(os.getenv("RECENT_CHECK_HOURS", 24))  # Проверять релизы за последние 24 часа
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", 5))
 
 # Spotipy config
@@ -126,9 +127,12 @@ def load_last_releases():
     try:
         if os.path.exists(DATA_FILE):
             with open(DATA_FILE, "r") as f:
-                return json.load(f)
+                data = json.load(f)
+                logger.info(f"Loaded data from {DATA_FILE}: {len(data)} artists with known releases")
+                return data
     except Exception as e:
         logger.error(f"Failed to load releases data: {e}")
+    logger.info(f"No existing data file found or error loading it. Starting fresh.")
     return {}
 
 def save_last_releases(data):
@@ -136,6 +140,7 @@ def save_last_releases(data):
     try:
         with open(DATA_FILE, "w") as f:
             json.dump(data, f)
+            logger.info(f"Saved data to {DATA_FILE} for {len(data)} artists")
     except Exception as e:
         logger.error(f"Failed to save releases data: {e}")
 
@@ -164,14 +169,18 @@ def get_followed_artists():
         raise
 
 @retry_with_backoff(max_tries=MAX_RETRIES, exceptions=(spotipy.exceptions.SpotifyException, Exception))
-def get_artist_releases(artist_id, since_date):
-    """Get artist releases with improved date handling and retries"""
+def get_artist_releases(artist_id, since_date, artist_name="Unknown"):
+    """Get artist releases with improved date handling, logging and retries"""
     releases = []
     try:
+        logger.info(f"Getting releases for artist {artist_name} (ID: {artist_id}) since {since_date}")
         results = sp.artist_albums(artist_id, album_type="album,single", country="US", limit=50)
+        logger.info(f"API returned {len(results.get('items', []))} total items for artist {artist_name}")
         
-        for r in results["items"]:
+        for r in results.get("items", []):
             release_date = r["release_date"]
+            release_id = r["id"]
+            release_name = r["name"]
             
             # Преобразование дат в полный формат для корректного сравнения
             parsed_date = None
@@ -194,19 +203,24 @@ def get_artist_releases(artist_id, since_date):
             else:
                 parsed_date = release_date
             
+            # Логирование информации о дате для отладки
+            compare_result = parsed_date >= since_date
+            logger.info(f"Release: {release_name}, ID: {release_id}, Date: {release_date}, Parsed: {parsed_date}, Compare with: {since_date}, Result: {compare_result}")
+            
             # Используем оригинальную дату для отображения, но полную для сравнения
-            if parsed_date >= since_date:
+            if compare_result:
                 # Получаем дополнительную информацию о релизе
                 try:
-                    full_album = sp.album(r["id"])
+                    full_album = sp.album(release_id)
                     popularity = full_album.get("popularity", 0)
+                    logger.info(f"Adding release to results: {release_name} (ID: {release_id}), Popularity: {popularity}")
                 except Exception as e:
-                    logger.warning(f"Failed to get full album info for {r['id']}: {e}")
+                    logger.warning(f"Failed to get full album info for {release_id}: {e}")
                     popularity = 0
                 
                 releases.append({
-                    "id": r["id"],
-                    "name": r["name"],
+                    "id": release_id,
+                    "name": release_name,
                     "release_date": release_date,  # Оригинальная дата для отображения
                     "type": r["album_type"],
                     "url": r["external_urls"]["spotify"],
@@ -214,34 +228,53 @@ def get_artist_releases(artist_id, since_date):
                     "total_tracks": r.get("total_tracks", 0),
                     "popularity": popularity
                 })
+            else:
+                logger.info(f"Skipping release due to date: {release_name} ({release_date})")
         
+        logger.info(f"Found {len(releases)} releases after date filtering for artist {artist_name}")
         return releases
     except Exception as e:
-        logger.error(f"Failed to get releases for artist {artist_id}: {e}")
+        logger.error(f"Failed to get releases for artist {artist_name} (ID: {artist_id}): {e}")
         raise
 
 def process_queue():
     """Process message queue with error handling"""
-    global queue_processing
+    global queue_processing, QUEUE_LIST
     queue_processing = True
     
     try:
         while not QUEUE.empty():
             item = QUEUE.get()
             try:
-                # Отправка сообщения
+                logger.info(f"Processing queue item for {item['artist']} - {item['release']}")
+                
+                # Отправка сообщения с картинкой или без
                 if item["image"]:
-                    bot.send_photo(TELEGRAM_CHANNEL_ID, photo=item["image"], 
-                                   caption=item["message"], parse_mode="Markdown")
+                    sent_message = bot.send_photo(
+                        TELEGRAM_CHANNEL_ID, 
+                        photo=item["image"], 
+                        caption=item["message"], 
+                        parse_mode="Markdown"
+                    )
+                    logger.info(f"Sent photo message with ID {sent_message.message_id}")
                 else:
-                    bot.send_message(TELEGRAM_CHANNEL_ID, 
-                                     item["message"], parse_mode="Markdown")
+                    sent_message = bot.send_message(
+                        TELEGRAM_CHANNEL_ID, 
+                        item["message"], 
+                        parse_mode="Markdown"
+                    )
+                    logger.info(f"Sent text message with ID {sent_message.message_id}")
                 
                 # Отправка опроса
-                time.sleep(2)
+                time.sleep(2)  # Небольшая пауза между сообщениями
                 poll_q = f"{POLL_QUESTION} {item['artist']} - {item['release']}"
-                bot.send_poll(TELEGRAM_CHANNEL_ID, question=poll_q[:255], 
-                              options=POLL_OPTIONS, is_anonymous=POLL_IS_ANONYMOUS)
+                poll = bot.send_poll(
+                    TELEGRAM_CHANNEL_ID, 
+                    question=poll_q[:255],  # Ограничение длины вопроса
+                    options=POLL_OPTIONS, 
+                    is_anonymous=POLL_IS_ANONYMOUS
+                )
+                logger.info(f"Sent poll with ID {poll.message_id}")
                 
                 # Удаляем обработанный элемент из отслеживаемого списка
                 for i, queued_item in enumerate(QUEUE_LIST):
@@ -249,21 +282,40 @@ def process_queue():
                         QUEUE_LIST.pop(i)
                         break
                 
-                logger.info(f"Sent message for: {item['artist']} - {item['release']}")
+                logger.info(f"Successfully sent message for: {item['artist']} - {item['release']}. Remaining queue: {len(QUEUE_LIST)}")
                 
-                # Ожидание перед следующим сообщением
+                # Обновляем предполагаемое время публикации для оставшихся элементов
+                current_time = datetime.now()
+                for i, queued_item in enumerate(QUEUE_LIST):
+                    queued_item["scheduled_time"] = current_time + timedelta(minutes=i * POST_INTERVAL_MINUTES)
+                
+                # Ожидание перед отправкой следующего сообщения
                 if not QUEUE.empty():
-                    logger.info(f"Waiting {POST_INTERVAL_MINUTES} minutes before next message")
+                    logger.info(f"Waiting {POST_INTERVAL_MINUTES} minutes before sending next message")
                     time.sleep(POST_INTERVAL_MINUTES * 60)
                     
             except Exception as e:
-                logger.error(f"Failed to send message: {e}")
-                # Перейти к следующему сообщению при ошибке
+                logger.error(f"Failed to send Telegram message: {e}")
+                # Возвращаем в очередь при ошибке (не более 3 раз)
+                retries = item.get("retries", 0)
+                if retries < 3:
+                    item["retries"] = retries + 1
+                    logger.info(f"Requeueing message (retry {retries + 1}/3)")
+                    QUEUE.put(item)
+                    # Не удаляем из QUEUE_LIST, так как элемент возвращается в очередь
+                    time.sleep(60)  # Ожидание минуту перед повторной попыткой
+                else:
+                    logger.error(f"Gave up after 3 retries for {item['artist']} - {item['release']}")
+                    # Если превышено количество попыток, удаляем из QUEUE_LIST
+                    for i, queued_item in enumerate(QUEUE_LIST):
+                        if queued_item.get("id") == item.get("id"):
+                            QUEUE_LIST.pop(i)
+                            break
     except Exception as e:
         logger.error(f"Error in queue processing: {e}")
     
     queue_processing = False
-    logger.info("Queue processing completed")
+    logger.info("Message queue processing completed")
 
 def send_to_telegram(artist, release):
     """Send message to Telegram with proper error handling"""
@@ -272,7 +324,7 @@ def send_to_telegram(artist, release):
         genres = artist.get("genres", [])
         hashtags = " ".join(convert_to_hashtag(g) for g in genres[:5] if g)
         
-        # Форматирование сообщения
+        # Формирование сообщения
         msg = f"*{artist['name']}*\n*{release['name']}*\n{release['release_date']} #{release['type']} {release['total_tracks']} tracks\n{hashtags}\n🎧 Listen on [Spotify]({release['url']})"
         
         # Создаем уникальный ID для элемента очереди
@@ -288,8 +340,10 @@ def send_to_telegram(artist, release):
             "id": item_id,
             "artist": artist["name"],
             "release": release["name"],
+            "release_id": release["id"],
             "message": msg,
-            "image": release.get("image_url")
+            "image": release.get("image_url"),
+            "scheduled_time": datetime.now() + timedelta(minutes=len(QUEUE_LIST) * POST_INTERVAL_MINUTES)
         }
         
         QUEUE.put(queue_item)
@@ -307,57 +361,75 @@ def send_to_telegram(artist, release):
         logger.error(f"Failed to queue message for Telegram: {e}")
 
 def check_new_releases():
-    """Check for new releases with error handling"""
+    """Check for new releases with improved handling and logging"""
     global NEXT_CHECK_TIME
     
     try:
         today = datetime.now().strftime("%Y-%m-%d")
         last = load_last_releases()
         
+        # Всегда проверяем релизы за последние N часов (настраивается через переменную окружения)
+        recent_date = (datetime.now() - timedelta(hours=RECENT_CHECK_HOURS)).strftime("%Y-%m-%d")
+        logger.info(f"Using recent date window: {recent_date} (last {RECENT_CHECK_HOURS} hours)")
+        
         followed_artists = get_followed_artists()
         logger.info(f"Checking releases for {len(followed_artists)} artists")
         
         new_releases_found = 0
+        recently_checked_artists = 0
         
         for artist in followed_artists:
             aid = artist["id"]
+            artist_name = artist["name"]
             known = last.get(aid, {}).get("known_releases", [])
-            since = last.get(aid, {}).get(
+            
+            # Получаем дату последней проверки или используем значение по умолчанию
+            last_check_date = last.get(aid, {}).get(
                 "last_check_date", 
                 (datetime.now() - timedelta(days=INITIAL_CHECK_DAYS)).strftime("%Y-%m-%d")
             )
             
+            # Используем более позднюю дату из: 1) дата последней проверки, 2) дата для недавних релизов
+            # Это гарантирует, что мы всегда проверяем релизы за последние N часов
+            since_date = max(last_check_date, recent_date)
+            
+            if since_date == recent_date:
+                recently_checked_artists += 1
+            
+            logger.info(f"Checking artist {artist_name} (ID: {aid}), Last check: {last_check_date}, Using since: {since_date}")
+            
             try:
-                releases = get_artist_releases(aid, since)
+                releases = get_artist_releases(aid, since_date, artist_name)
                 if releases:
-                    logger.info(f"Found {len(releases)} potential new releases for {artist['name']}")
+                    logger.info(f"Found {len(releases)} potential new releases for {artist_name}")
                 
                 for release in releases:
-                    if release["id"] not in known:
-                        logger.info(f"New release found: {artist['name']} - {release['name']} (ID: {release['id']})")
+                    release_id = release["id"]
+                    if release_id not in known:
+                        logger.info(f"NEW RELEASE FOUND: {artist_name} - {release['name']} (ID: {release_id}, Date: {release['release_date']})")
                         send_to_telegram(artist, release)
-                        known.append(release["id"])
+                        known.append(release_id)
                         new_releases_found += 1
+                    else:
+                        logger.info(f"Skipping already known release: {artist_name} - {release['name']} (ID: {release_id})")
                 
                 last[aid] = {
                     "last_check_date": today,
                     "known_releases": known
                 }
             except Exception as e:
-                logger.error(f"Error processing artist {artist['name']}: {e}")
+                logger.error(f"Error processing artist {artist_name}: {e}")
         
         save_last_releases(last)
         
         # Обновляем время следующей проверки
         NEXT_CHECK_TIME = datetime.now() + timedelta(hours=CHECK_INTERVAL_HOURS)
-        logger.info(f"Check completed. Found {new_releases_found} new releases. Next check at {NEXT_CHECK_TIME.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"Check completed. Found {new_releases_found} new releases from {recently_checked_artists} recently checked artists. Next check at {NEXT_CHECK_TIME.strftime('%Y-%m-%d %H:%M:%S')}")
         
-        # Возвращаем количество найденных релизов
         return new_releases_found
         
     except Exception as e:
         logger.error(f"Check for new releases failed: {e}")
-        # В случае ошибки возвращаем -1
         return -1
 
 # Обработчики команд для Telegram бота
@@ -399,6 +471,7 @@ def show_status(message):
             f"Время работы: {days}d {hours}h {minutes}m {seconds}s",
             f"Очередь: {len(QUEUE_LIST)} релизов в ожидании",
             f"Интервал проверки: каждые {CHECK_INTERVAL_HOURS} часов",
+            f"Окно поиска релизов: последние {RECENT_CHECK_HOURS} часов",
             f"Интервал публикации: каждые {POST_INTERVAL_MINUTES} минут",
             f"Следующая проверка новых релизов: {next_check}"
         ]
@@ -410,7 +483,7 @@ def show_status(message):
         bot.send_message(message.chat.id, "Ошибка при получении статуса бота.")
 
 # Команда для очистки очереди
-@bot.message_handler(commands=['clear_queue'])
+@bot.message_handler(commands=['clearqueue'])
 def clear_queue(message):
     """Очистить очередь публикации"""
     try:
@@ -433,6 +506,21 @@ def clear_queue(message):
         logger.error(f"Error in clear_queue handler: {e}")
         bot.send_message(message.chat.id, "Ошибка при очистке очереди.")
 
+# Команда для сброса данных о релизах
+@bot.message_handler(commands=['resetdata'])
+def reset_data(message):
+    """Сбросить данные о известных релизах"""
+    try:
+        if os.path.exists(DATA_FILE):
+            os.remove(DATA_FILE)
+            logger.info(f"Data file {DATA_FILE} removed by user {message.from_user.username} (ID: {message.from_user.id})")
+            bot.send_message(message.chat.id, f"Данные о известных релизах сброшены. При следующей проверке бот будет искать релизы за последние {INITIAL_CHECK_DAYS} дней.")
+        else:
+            bot.send_message(message.chat.id, "Файл данных не найден.")
+    except Exception as e:
+        logger.error(f"Error in reset_data handler: {e}")
+        bot.send_message(message.chat.id, "Ошибка при сбросе данных.")
+
 # Команда для ручного запуска проверки новых релизов
 @bot.message_handler(commands=['checknow'])
 def manual_check(message):
@@ -442,7 +530,7 @@ def manual_check(message):
         bot.send_message(message.chat.id, "Запуск проверки новых релизов...")
         logger.info(f"Manual check triggered by user {getattr(message.from_user, 'username', 'Unknown')} (ID: {message.from_user.id})")
         
-        # Запускаем проверку в отдельном потоке, но с прямой обратной связью
+        # Запускаем проверку в отдельном потоке
         def run_check_and_reply():
             try:
                 # Обновляем токен Spotify
@@ -452,7 +540,6 @@ def manual_check(message):
                     logger.info("Spotify token refreshed before manual check")
                 except Exception as token_error:
                     logger.error(f"Failed to refresh token: {token_error}")
-                    # Продолжаем даже при ошибке обновления токена
                 
                 # Запускаем проверку
                 new_releases = check_new_releases()
@@ -493,8 +580,9 @@ def show_help(message):
             "*Доступные команды:*",
             "/queue - Показать текущую очередь публикации релизов",
             "/status - Показать статус бота",
-            "/clear_queue - Очистить очередь публикации",
-            "/check_now - Запустить проверку новых релизов",
+            "/clearqueue - Очистить очередь публикации",
+            "/resetdata - Сбросить данные о известных релизах",
+            "/checknow - Запустить проверку новых релизов",
             "/help - Показать эту справку"
         ]
         
@@ -512,9 +600,8 @@ def echo_message(message):
     except Exception as e:
         logger.error(f"Error in echo_message handler: {e}")
 
-
 def run_bot():
-    """Main bot function with simplified and robust architecture"""
+    """Main bot function with improved error handling"""
     global sp
     
     logger.info("Starting Spotify Telegram Bot")
@@ -526,7 +613,7 @@ def run_bot():
             logger.error("Failed to initialize Spotify client")
             return
         
-        logger.info(f"Bot configured to check every {CHECK_INTERVAL_HOURS} hour(s)")
+        logger.info(f"Bot configured to check every {CHECK_INTERVAL_HOURS} hour(s) and look for releases in the last {RECENT_CHECK_HOURS} hours")
         
         # Запуск проверки релизов в отдельном потоке
         def check_releases_periodically():
@@ -543,6 +630,7 @@ def run_bot():
                     check_new_releases()
             except Exception as e:
                 logger.error(f"Error in check thread: {e}")
+                time.sleep(300)  # Пауза перед повторной попыткой
         
         # Запуск потока периодической проверки релизов
         check_thread = threading.Thread(target=check_releases_periodically, daemon=True)
@@ -560,54 +648,16 @@ def run_bot():
                     logger.info("Spotify token refreshed")
             except Exception as e:
                 logger.error(f"Error in token refresh thread: {e}")
+                time.sleep(300)  # Пауза перед повторной попыткой
         
         # Запуск потока обновления токена
         token_thread = threading.Thread(target=refresh_token_periodically, daemon=True)
         token_thread.start()
         logger.info("Started token refresh thread")
         
-        # Отключаем бесконечное повторение при ошибках и используем явный механизм опроса
+        # Запуск Telegram бота
         logger.info("Starting Telegram bot polling")
-        
-        # Используем переменную для отслеживания состояния бота
-        bot_running = True
-        
-        # Обертка для деликатной обработки исключений при опросе
-        def safe_polling():
-            nonlocal bot_running
-            try:
-                # Используем non_stop=False для предотвращения автоматического перезапуска
-                # и значительно меньший timeout
-                bot.polling(non_stop=False, interval=0.5, timeout=10)
-            except Exception as e:
-                logger.error(f"Polling error: {e}")
-                # Пауза перед следующей попыткой, чтобы не перегрузить API
-                time.sleep(10)
-                
-            # Если мы дошли до этой точки, значит opros прервался
-            if bot_running:
-                logger.info("Restarting polling after error")
-                safe_polling()  # Рекурсивно перезапускаем опрос
-        
-        # Запускаем обработку в основном потоке
-        safe_polling()
+        bot.polling(non_stop=True, interval=1, timeout=20)
         
     except Exception as e:
         logger.error(f"Bot initialization failed: {e}")
-
-if __name__ == "__main__":
-    # Установка обработчика неперехваченных исключений
-    def handle_exception(exc_type, exc_value, exc_traceback):
-        if issubclass(exc_type, KeyboardInterrupt):
-            sys.__excepthook__(exc_type, exc_value, exc_traceback)
-            return
-        logger.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
-    
-    sys.excepthook = handle_exception
-    
-    # Запуск бота с защитой от падения
-    try:
-        run_bot()
-    except Exception as e:
-        logger.critical(f"Fatal error: {e}")
-        sys.exit(1)
