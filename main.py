@@ -359,93 +359,117 @@ def check_new_releases():
 @bot.message_handler(commands=['queue'])
 def show_queue(message):
     """Показать текущую очередь релизов"""
-    if not QUEUE_LIST:
-        bot.reply_to(message, "Очередь пуста. Нет запланированных релизов.")
-        return
-    
-    current_time = datetime.now()
-    queue_info = ["*Очередь релизов:*"]
-    
-    for i, item in enumerate(QUEUE_LIST, 1):
-        eta = f"скоро" if i == 1 else f"через ~{i*POST_INTERVAL_MINUTES} мин"
-        queue_info.append(f"{i}. *{item['artist']}* - *{item['release']}* ({eta})")
-    
-    # Отправка сообщения с информацией о очереди
-    bot.reply_to(message, "\n".join(queue_info), parse_mode="Markdown")
+    try:
+        if not QUEUE_LIST:
+            bot.send_message(message.chat.id, "Очередь пуста. Нет запланированных релизов.")
+            return
+        
+        current_time = datetime.now()
+        queue_info = ["*Очередь релизов:*"]
+        
+        for i, item in enumerate(QUEUE_LIST, 1):
+            eta = f"скоро" if i == 1 else f"через ~{i*POST_INTERVAL_MINUTES} мин"
+            queue_info.append(f"{i}. *{item['artist']}* - *{item['release']}* ({eta})")
+        
+        # Отправка сообщения с информацией о очереди
+        bot.send_message(message.chat.id, "\n".join(queue_info), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in show_queue handler: {e}")
+        bot.send_message(message.chat.id, "Ошибка при получении информации об очереди.")
 
 # Статус бота и мониторинг
 @bot.message_handler(commands=['status'])
 def show_status(message):
     """Показать статус бота"""
-    uptime = datetime.now() - START_TIME
-    days = uptime.days
-    hours, remainder = divmod(uptime.seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    
-    next_check = NEXT_CHECK_TIME.strftime('%Y-%m-%d %H:%M:%S') if NEXT_CHECK_TIME else 'Не запланирована'
-    
-    status_info = [
-        "*Статус Spotify Telegram бота:*",
-        f"Время работы: {days}d {hours}h {minutes}m {seconds}s",
-        f"Очередь: {len(QUEUE_LIST)} релизов в ожидании",
-        f"Интервал проверки: каждые {CHECK_INTERVAL_HOURS} часов",
-        f"Интервал публикации: каждые {POST_INTERVAL_MINUTES} минут",
-        f"Следующая проверка новых релизов: {next_check}"
-    ]
-    
-    # Отправка сообщения со статусом
-    bot.reply_to(message, "\n".join(status_info), parse_mode="Markdown")
+    try:
+        uptime = datetime.now() - START_TIME
+        days = uptime.days
+        hours, remainder = divmod(uptime.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        next_check = NEXT_CHECK_TIME.strftime('%Y-%m-%d %H:%M:%S') if NEXT_CHECK_TIME else 'Не запланирована'
+        
+        status_info = [
+            "*Статус Spotify Telegram бота:*",
+            f"Время работы: {days}d {hours}h {minutes}m {seconds}s",
+            f"Очередь: {len(QUEUE_LIST)} релизов в ожидании",
+            f"Интервал проверки: каждые {CHECK_INTERVAL_HOURS} часов",
+            f"Интервал публикации: каждые {POST_INTERVAL_MINUTES} минут",
+            f"Следующая проверка новых релизов: {next_check}"
+        ]
+        
+        # Отправка сообщения со статусом
+        bot.send_message(message.chat.id, "\n".join(status_info), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in show_status handler: {e}")
+        bot.send_message(message.chat.id, "Ошибка при получении статуса бота.")
 
 # Команда для очистки очереди
 @bot.message_handler(commands=['clear_queue'])
 def clear_queue(message):
     """Очистить очередь публикации"""
-    global QUEUE_LIST
-    
-    if not QUEUE_LIST:
-        bot.reply_to(message, "Очередь уже пуста.")
-        return
-    
-    queue_size = len(QUEUE_LIST)
-    
-    # Очистка очереди
-    with QUEUE.mutex:
-        QUEUE.queue.clear()
-    QUEUE_LIST.clear()
-    
-    logger.info(f"Queue cleared by user {message.from_user.username} (ID: {message.from_user.id}). {queue_size} items removed.")
-    bot.reply_to(message, f"Очередь очищена. Удалено {queue_size} релизов из очереди публикации.")
+    try:
+        global QUEUE_LIST
+        
+        if not QUEUE_LIST:
+            bot.send_message(message.chat.id, "Очередь уже пуста.")
+            return
+        
+        queue_size = len(QUEUE_LIST)
+        
+        # Очистка очереди
+        with QUEUE.mutex:
+            QUEUE.queue.clear()
+        QUEUE_LIST.clear()
+        
+        logger.info(f"Queue cleared by user {message.from_user.username} (ID: {message.from_user.id}). {queue_size} items removed.")
+        bot.send_message(message.chat.id, f"Очередь очищена. Удалено {queue_size} релизов из очереди публикации.")
+    except Exception as e:
+        logger.error(f"Error in clear_queue handler: {e}")
+        bot.send_message(message.chat.id, "Ошибка при очистке очереди.")
 
 # Команда для ручного запуска проверки новых релизов
 @bot.message_handler(commands=['check_now'])
 def manual_check(message):
     """Запустить проверку новых релизов вручную"""
-    bot.reply_to(message, "Запуск проверки новых релизов...")
-    logger.info(f"Manual check triggered by user {message.from_user.username} (ID: {message.from_user.id})")
-    
-    # Запуск проверки в отдельном потоке
-    threading.Thread(target=check_new_releases, daemon=True).start()
+    try:
+        bot.send_message(message.chat.id, "Запуск проверки новых релизов...")
+        logger.info(f"Manual check triggered by user {message.from_user.username} (ID: {message.from_user.id})")
+        
+        # Запуск проверки в отдельном потоке
+        threading.Thread(target=check_new_releases, daemon=True).start()
+    except Exception as e:
+        logger.error(f"Error in manual_check handler: {e}")
+        bot.send_message(message.chat.id, "Ошибка при запуске проверки релизов.")
 
 # Команда для помощи
 @bot.message_handler(commands=['help'])
 def show_help(message):
     """Показать список доступных команд"""
-    help_text = [
-        "*Доступные команды:*",
-        "/queue - Показать текущую очередь публикации релизов",
-        "/status - Показать статус бота",
-        "/clear_queue - Очистить очередь публикации",
-        "/check_now - Запустить проверку новых релизов",
-        "/help - Показать эту справку"
-    ]
-    
-    bot.reply_to(message, "\n".join(help_text), parse_mode="Markdown")
+    try:
+        help_text = [
+            "*Доступные команды:*",
+            "/queue - Показать текущую очередь публикации релизов",
+            "/status - Показать статус бота",
+            "/clear_queue - Очистить очередь публикации",
+            "/check_now - Запустить проверку новых релизов",
+            "/help - Показать эту справку"
+        ]
+        
+        bot.send_message(message.chat.id, "\n".join(help_text), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Error in show_help handler: {e}")
+        bot.send_message(message.chat.id, "Ошибка при отображении справки.")
 
 # Обработчик текстовых сообщений
 @bot.message_handler(func=lambda message: True)
 def echo_message(message):
     """Обработчик всех остальных сообщений"""
-    bot.reply_to(message, "Используйте /help для просмотра доступных команд.")
+    try:
+        bot.send_message(message.chat.id, "Используйте /help для просмотра доступных команд.")
+    except Exception as e:
+        logger.error(f"Error in echo_message handler: {e}")
+
 
 def run_bot():
     """Main bot function with simplified and robust architecture"""
