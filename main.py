@@ -13,6 +13,7 @@ import re
 from datetime import datetime, timedelta
 import sys
 import functools
+import requests
 
 # Logging
 logging.basicConfig(
@@ -65,6 +66,7 @@ queue_processing = False
 sp = None  # Will be initialized properly
 START_TIME = datetime.now()
 NEXT_CHECK_TIME = None
+BOT_RUNNING = False  # Флаг для отслеживания статуса бота
 
 try:
     bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
@@ -437,6 +439,7 @@ def check_new_releases():
 def show_queue(message):
     """Показать текущую очередь релизов"""
     try:
+        logger.info(f"Command /queue received from user {message.from_user.username} (ID: {message.from_user.id})")
         if not QUEUE_LIST:
             bot.send_message(message.chat.id, "Очередь пуста. Нет запланированных релизов.")
             return
@@ -450,6 +453,7 @@ def show_queue(message):
         
         # Отправка сообщения с информацией о очереди
         bot.send_message(message.chat.id, "\n".join(queue_info), parse_mode="Markdown")
+        logger.info(f"Queue info sent: {len(QUEUE_LIST)} items")
     except Exception as e:
         logger.error(f"Error in show_queue handler: {e}")
         bot.send_message(message.chat.id, "Ошибка при получении информации об очереди.")
@@ -459,6 +463,7 @@ def show_queue(message):
 def show_status(message):
     """Показать статус бота"""
     try:
+        logger.info(f"Command /status received from user {message.from_user.username} (ID: {message.from_user.id})")
         uptime = datetime.now() - START_TIME
         days = uptime.days
         hours, remainder = divmod(uptime.seconds, 3600)
@@ -478,6 +483,7 @@ def show_status(message):
         
         # Отправка сообщения со статусом
         bot.send_message(message.chat.id, "\n".join(status_info), parse_mode="Markdown")
+        logger.info("Status info sent")
     except Exception as e:
         logger.error(f"Error in show_status handler: {e}")
         bot.send_message(message.chat.id, "Ошибка при получении статуса бота.")
@@ -487,6 +493,7 @@ def show_status(message):
 def clear_queue(message):
     """Очистить очередь публикации"""
     try:
+        logger.info(f"Command /clearqueue received from user {message.from_user.username} (ID: {message.from_user.id})")
         global QUEUE_LIST
         
         if not QUEUE_LIST:
@@ -511,6 +518,7 @@ def clear_queue(message):
 def reset_data(message):
     """Сбросить данные о известных релизах"""
     try:
+        logger.info(f"Command /resetdata received from user {message.from_user.username} (ID: {message.from_user.id})")
         if os.path.exists(DATA_FILE):
             os.remove(DATA_FILE)
             logger.info(f"Data file {DATA_FILE} removed by user {message.from_user.username} (ID: {message.from_user.id})")
@@ -526,9 +534,9 @@ def reset_data(message):
 def manual_check(message):
     """Запустить проверку новых релизов вручную"""
     try:
+        logger.info(f"Command /checknow received from user {message.from_user.username} (ID: {message.from_user.id})")
         # Отправляем уведомление о начале проверки
         bot.send_message(message.chat.id, "Запуск проверки новых релизов...")
-        logger.info(f"Manual check triggered by user {getattr(message.from_user, 'username', 'Unknown')} (ID: {message.from_user.id})")
         
         # Запускаем проверку в отдельном потоке
         def run_check_and_reply():
@@ -576,6 +584,7 @@ def manual_check(message):
 def show_help(message):
     """Показать список доступных команд"""
     try:
+        logger.info(f"Command /help received from user {message.from_user.username} (ID: {message.from_user.id})")
         help_text = [
             "*Доступные команды:*",
             "/queue - Показать текущую очередь публикации релизов",
@@ -591,26 +600,73 @@ def show_help(message):
         logger.error(f"Error in show_help handler: {e}")
         bot.send_message(message.chat.id, "Ошибка при отображении справки.")
 
+# Команда для пинга бота
+@bot.message_handler(commands=['ping'])
+def ping(message):
+    """Простой тест доступности бота"""
+    try:
+        logger.info(f"Command /ping received from user {message.from_user.username} (ID: {message.from_user.id})")
+        bot.send_message(message.chat.id, "Pong! Бот работает.")
+    except Exception as e:
+        logger.error(f"Error in ping handler: {e}")
+        bot.send_message(message.chat.id, "Ошибка при отправке ответа.")
+
 # Обработчик текстовых сообщений
 @bot.message_handler(func=lambda message: True)
 def echo_message(message):
     """Обработчик всех остальных сообщений"""
     try:
+        logger.info(f"Received message from user {message.from_user.username} (ID: {message.from_user.id}): {message.text}")
         bot.send_message(message.chat.id, "Используйте /help для просмотра доступных команд.")
     except Exception as e:
         logger.error(f"Error in echo_message handler: {e}")
 
+# Прямая проверка на наличие webhook
+def check_and_delete_webhook():
+    """Проверяет и удаляет webhook если он установлен"""
+    try:
+        logger.info("Checking if webhook is set...")
+        api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getWebhookInfo"
+        response = requests.get(api_url)
+        webhook_info = response.json()
+        
+        if webhook_info.get('ok') and webhook_info.get('result'):
+            webhook_url = webhook_info['result'].get('url', '')
+            if webhook_url:
+                logger.warning(f"Found active webhook: {webhook_url}. Deleting...")
+                delete_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook"
+                delete_response = requests.get(delete_url)
+                if delete_response.json().get('ok'):
+                    logger.info("Webhook deleted successfully")
+                else:
+                    logger.error(f"Failed to delete webhook: {delete_response.json()}")
+            else:
+                logger.info("No webhook set")
+        else:
+            logger.warning(f"Failed to get webhook info: {webhook_info}")
+    except Exception as e:
+        logger.error(f"Error checking webhook: {e}")
+
 def run_bot():
-    """Main bot function with improved error handling"""
-    global sp
+    """Main bot function with improved error handling and webhook check"""
+    global sp, BOT_RUNNING
     
+    if BOT_RUNNING:
+        logger.warning("Bot is already running, skipping duplicate start")
+        return
+    
+    BOT_RUNNING = True
     logger.info("Starting Spotify Telegram Bot")
     
     try:
+        # Проверяем и удаляем webhook если он установлен
+        check_and_delete_webhook()
+        
         # Инициализация Spotify клиента
         sp = initialize_spotify()
         if not sp:
             logger.error("Failed to initialize Spotify client")
+            BOT_RUNNING = False
             return
         
         logger.info(f"Bot configured to check every {CHECK_INTERVAL_HOURS} hour(s) and look for releases in the last {RECENT_CHECK_HOURS} hours")
@@ -655,9 +711,53 @@ def run_bot():
         token_thread.start()
         logger.info("Started token refresh thread")
         
-        # Запуск Telegram бота
-        logger.info("Starting Telegram bot polling")
-        bot.polling(non_stop=True, interval=1, timeout=20)
+        # Прямое получение обновлений для диагностики
+        def test_telegram_connection():
+            try:
+                logger.info("Testing direct Telegram API connection...")
+                api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe"
+                response = requests.get(api_url)
+                result = response.json()
+                if result.get('ok'):
+                    bot_info = result.get('result', {})
+                    logger.info(f"Connected to Telegram as {bot_info.get('username')} (ID: {bot_info.get('id')})")
+                else:
+                    logger.error(f"Telegram API connection failed: {result}")
+            except Exception as e:
+                logger.error(f"Error testing Telegram connection: {e}")
+        
+        # Проверяем соединение с Telegram API
+        test_telegram_connection()
+        
+        # Запуск бота с обработкой ошибок
+        logger.info("Starting polling with max timeout=30 and interval=1")
+        bot.infinity_polling(timeout=30, interval=1, long_polling_timeout=15)
         
     except Exception as e:
         logger.error(f"Bot initialization failed: {e}")
+    finally:
+        BOT_RUNNING = False
+        logger.warning("Bot stopped")
+
+if __name__ == "__main__":
+    # Установка обработчика неперехваченных исключений
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        logger.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+    
+    sys.excepthook = handle_exception
+    
+    # Запуск бота с защитой от падения и автоматическим перезапуском
+    while True:
+        try:
+            logger.info("Starting bot process...")
+            BOT_RUNNING = False  # Сброс флага перед запуском
+            run_bot()
+            logger.error("Bot function exited unexpectedly")
+        except Exception as e:
+            logger.critical(f"Fatal error: {e}")
+        
+        logger.info("Waiting 60 seconds before restart...")
+        time.sleep(60)  # Пауза перед перезапуском
