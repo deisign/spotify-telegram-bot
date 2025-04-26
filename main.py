@@ -194,6 +194,12 @@ def check_playlists_for_updates():
                                             new_releases.append(release_info)
                                             logger.debug(f"Найден новый релиз: {release_info['artist']} - {release_info['title']}")
             
+            except spotipy.exceptions.SpotifyException as e:
+                if e.http_status == 404:
+                    logger.warning(f"Плейлист {playlist_id} не найден (404). Пропускаем...")
+                else:
+                    logger.error(f"Ошибка Spotify API при обработке плейлиста {playlist_id}: {e}")
+                continue
             except Exception as e:
                 logger.error(f"Ошибка при обработке плейлиста {playlist_id}: {e}")
                 logger.error(traceback.format_exc())
