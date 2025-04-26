@@ -5,14 +5,12 @@ import requests
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 from datetime import datetime, timedelta
-import base64
 import pytz
 import time
 import logging
 import sqlite3
 import sys
 import traceback
-import threading
 
 # Настройка логгера
 logger = logging.getLogger(__name__)
@@ -122,22 +120,13 @@ playlist_ids = [
     '37i9dQZF1DWWjGdmeTyeJ6',  # ¡Viva Latino!
     '37i9dQZF1DWVmps5U8gHNv',  # Trap Nation
     '37i9dQZF1DXcF6B6QPhFDv',  # Rock This
-    # Закомментированы несуществующие плейлисты
-    # '37i9dQZF1DWUa8ZRTfalHk',
-    # '37i9dQZF1DX0BcQWzuB7ZO',
-    # '37i9dQZF1DX4dyzvuaRJ0n',
-    # '37i9dQZF1DX82Zzp6AKx64',
-    # '37i9dQZF1DXcZDD7cfEKhW',
-    # '37i9dQZF1DX7KNKjOK0o75',
-    # '37i9dQZF1DX4sWSpwq3LiO',
-    # '37i9dQZF1DX4SBhb3fqCJd'
 ]
 
 # Инициализация Spotify клиента
 client_credentials_manager = SpotifyClientCredentials(client_id=spotify_client_id, client_secret=spotify_client_secret)
 sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
 
-# Инициализация бота
+# Инициализация бота - ОТКЛЮЧАЕМ МНОГОПОТОЧНОСТЬ
 bot = telebot.TeleBot(bot_token, parse_mode='HTML', threaded=False)
 
 # Инициализация БД
@@ -345,17 +334,6 @@ def check_and_post_from_queue():
         logger.error(f"Ошибка в check_and_post_from_queue: {e}")
         logger.error(traceback.format_exc())
 
-# Таймеры без APScheduler
-def run_periodic_check():
-    while True:
-        check_playlists_for_updates()
-        time.sleep(3 * 60 * 60)  # Каждые 3 часа
-
-def run_queue_check():
-    while True:
-        check_and_post_from_queue()
-        time.sleep(60)  # Каждую минуту
-
 # Команда проверки плейлистов
 @bot.message_handler(commands=['check_playlists'])
 def check_playlists_availability(message):
@@ -400,19 +378,38 @@ def show_queue(message):
         notify_admin_about_queue(queue_items)
 
 if __name__ == '__main__':
-    # Запускаем треды для периодических задач
-    periodic_check_thread = threading.Thread(target=run_periodic_check, daemon=True)
-    queue_check_thread = threading.Thread(target=run_queue_check, daemon=True)
-    
-    periodic_check_thread.start()
-    queue_check_thread.start()
-    
-    # Запускаем бота с infinity_polling для лучшей стабильности
     logger.info("Запуск бота...")
+    
+    # Создаем простой цикл без потоков
+    last_check_time = time.time()
+    last_queue_check = time.time()
+    
     while True:
         try:
-            bot.infinity_polling(timeout=20, long_polling_timeout=5)
+            # Проверяем плейлисты каждые 3 часа
+            if time.time() - last_check_time > 3 * 60 * 60:
+                check_playlists_for_updates()
+                last_check_time = time.time()
+            
+            # Проверяем очередь каждую минуту
+            if time.time() - last_queue_check > 60:
+                check_and_post_from_queue()
+                last_queue_check = time.time()
+            
+            # Обрабатываем сообщения (один раз, без polling)
+            try:
+                updates = bot.get_updates(timeout=1, long_polling_timeout=1)
+                if updates:
+                    for update in updates:
+                        bot.process_new_updates([update])
+            except Exception as e:
+                logger.error(f"Ошибка при получении обновлений: {e}")
+                time.sleep(5)
+            
+            # Небольшая пауза, чтобы не перегружать процессор
+            time.sleep(1)
+            
         except Exception as e:
-            logger.error(f"Ошибка бота: {e}")
+            logger.error(f"Общая ошибка: {e}")
             logger.error(traceback.format_exc())
-            time.sleep(15)  # Увеличиваем паузу до 15 секунд
+            time.sleep(5)
