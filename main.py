@@ -138,7 +138,7 @@ client_credentials_manager = SpotifyClientCredentials(client_id=spotify_client_i
 sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
 
 # Инициализация бота
-bot = telebot.TeleBot(bot_token, parse_mode='HTML')
+bot = telebot.TeleBot(bot_token, parse_mode='HTML', threaded=False)
 
 # Инициализация БД
 init_db()
@@ -400,43 +400,19 @@ def show_queue(message):
         notify_admin_about_queue(queue_items)
 
 if __name__ == '__main__':
-    # Проверка на единственность экземпляра
-    lock_file = 'bot.lock'
-    try:
-        if os.path.exists(lock_file):
-            logger.warning("Файл блокировки найден. Возможно, уже запущен другой экземпляр бота.")
-            logger.info("Попытка удалить старый файл блокировки...")
-            os.remove(lock_file)
-        
-        # Создаем файл блокировки
-        with open(lock_file, 'w') as f:
-            f.write(str(os.getpid()))
-        
-        # Запускаем треды для периодических задач
-        periodic_check_thread = threading.Thread(target=run_periodic_check, daemon=True)
-        queue_check_thread = threading.Thread(target=run_queue_check, daemon=True)
-        
-        periodic_check_thread.start()
-        queue_check_thread.start()
-        
-        # Запускаем бота
-        logger.info("Запуск бота...")
-        while True:
-            try:
-                bot.polling(none_stop=True, interval=0, timeout=20)
-            except telebot.apihelper.ApiTelegramException as e:
-                if e.error_code == 409:
-                    logger.error("Конфликт: обнаружен другой запущенный экземпляр бота. Ожидание 30 секунд...")
-                    time.sleep(30)
-                else:
-                    logger.error(f"Telegram API ошибка: {e}")
-                    logger.error(traceback.format_exc())
-                    time.sleep(5)
-            except Exception as e:
-                logger.error(f"Ошибка бота: {e}")
-                logger.error(traceback.format_exc())
-                time.sleep(5)
-    finally:
-        # Удаляем файл блокировки при выходе
-        if os.path.exists(lock_file):
-            os.remove(lock_file)
+    # Запускаем треды для периодических задач
+    periodic_check_thread = threading.Thread(target=run_periodic_check, daemon=True)
+    queue_check_thread = threading.Thread(target=run_queue_check, daemon=True)
+    
+    periodic_check_thread.start()
+    queue_check_thread.start()
+    
+    # Запускаем бота с infinity_polling для лучшей стабильности
+    logger.info("Запуск бота...")
+    while True:
+        try:
+            bot.infinity_polling(timeout=20, long_polling_timeout=5)
+        except Exception as e:
+            logger.error(f"Ошибка бота: {e}")
+            logger.error(traceback.format_exc())
+            time.sleep(15)  # Увеличиваем паузу до 15 секунд
