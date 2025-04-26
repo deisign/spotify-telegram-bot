@@ -112,24 +112,25 @@ spotify_client_secret = os.getenv('SPOTIFY_CLIENT_SECRET')
 admin_id = 6400164260  # Ваш Telegram ID
 channel_id = os.getenv('TELEGRAM_CHANNEL_ID')
 
-# Массив плейлистов
+# Массив плейлистов (обновленный список)
 playlist_ids = [
-    '37i9dQZF1DX6J5NfMJS675',
-    '37i9dQZF1DX4JAvHpjipBk',
-    '37i9dQZF1DXcBWIGoYBM5M',
-    '37i9dQZF1DX0XUsuxWHRQd',
-    '37i9dQZF1DX10zKzsJ2jva',
-    '37i9dQZF1DWWjGdmeTyeJ6',
-    '37i9dQZF1DWVmps5U8gHNv',
-    '37i9dQZF1DXcF6B6QPhFDv',
-    '37i9dQZF1DWUa8ZRTfalHk',
-    '37i9dQZF1DX0BcQWzuB7ZO',
-    '37i9dQZF1DX4dyzvuaRJ0n',
-    '37i9dQZF1DX82Zzp6AKx64',
-    '37i9dQZF1DXcZDD7cfEKhW',
-    '37i9dQZF1DX7KNKjOK0o75',
-    '37i9dQZF1DX4sWSpwq3LiO',
-    '37i9dQZF1DX4SBhb3fqCJd'
+    '37i9dQZF1DX6J5NfMJS675',  # New Music Friday
+    '37i9dQZF1DX4JAvHpjipBk',  # New Music Friday (другая страна)
+    '37i9dQZF1DXcBWIGoYBM5M',  # Today's Top Hits
+    '37i9dQZF1DX0XUsuxWHRQd',  # RapCaviar
+    '37i9dQZF1DX10zKzsJ2jva',  # Hot Country
+    '37i9dQZF1DWWjGdmeTyeJ6',  # ¡Viva Latino!
+    '37i9dQZF1DWVmps5U8gHNv',  # Trap Nation
+    '37i9dQZF1DXcF6B6QPhFDv',  # Rock This
+    # Закомментированы несуществующие плейлисты
+    # '37i9dQZF1DWUa8ZRTfalHk',
+    # '37i9dQZF1DX0BcQWzuB7ZO',
+    # '37i9dQZF1DX4dyzvuaRJ0n',
+    # '37i9dQZF1DX82Zzp6AKx64',
+    # '37i9dQZF1DXcZDD7cfEKhW',
+    # '37i9dQZF1DX7KNKjOK0o75',
+    # '37i9dQZF1DX4sWSpwq3LiO',
+    # '37i9dQZF1DX4SBhb3fqCJd'
 ]
 
 # Инициализация Spotify клиента
@@ -242,34 +243,11 @@ def post_to_channel(release_from_queue):
         message_text = f"🆕 <b>{artist} - {title}</b>"
         
         keyboard = types.InlineKeyboardMarkup()
-        
-        query_parts = query.split(' - ')
-        song_title = query_parts[0]
-        artist_name = query_parts[1] if len(query_parts) > 1 else query_parts[0]
-        
-        query_encoded = base64.b64encode(query.encode('utf-8')).decode('utf-8')
-        apple_query = f"{song_title} {artist_name}"
-        apple_query_encoded = base64.b64encode(apple_query.encode('utf-8')).decode('utf-8')
-        
-        yandex_button = types.InlineKeyboardButton(
-            text="Яндекс Музыка",
-            url=f"https://deisigner-m.vercel.app?ytquery={query_encoded}"
-        )
-        apple_button = types.InlineKeyboardButton(
-            text="Apple Music",
-            url=f"https://deisigner-a.vercel.app?amquery={apple_query_encoded}"
-        )
-        youtube_button = types.InlineKeyboardButton(
-            text="YouTube",
-            url=f"https://deisigner-ym.vercel.app?ytmquery={query_encoded}"
-        )
         spotify_button = types.InlineKeyboardButton(
-            text="Spotify",
+            text="Слушать в Spotify",
             url=spotify_link
         )
-        
-        keyboard.row(spotify_button, apple_button)
-        keyboard.row(yandex_button, youtube_button)
+        keyboard.add(spotify_button)
         
         if image_url:
             response = requests.get(image_url)
@@ -378,6 +356,34 @@ def run_queue_check():
         check_and_post_from_queue()
         time.sleep(60)  # Каждую минуту
 
+# Команда проверки плейлистов
+@bot.message_handler(commands=['check_playlists'])
+def check_playlists_availability(message):
+    if message.from_user.id == admin_id:
+        bot.send_message(message.chat.id, "Проверяю доступность плейлистов...")
+        available_playlists = []
+        unavailable_playlists = []
+        
+        for playlist_id in playlist_ids:
+            try:
+                playlist = sp.playlist(playlist_id)
+                available_playlists.append(f"{playlist['name']} (ID: {playlist_id})")
+            except:
+                unavailable_playlists.append(playlist_id)
+        
+        response = "📊 <b>Статус плейлистов:</b>\n\n"
+        if available_playlists:
+            response += "✅ <b>Доступные плейлисты:</b>\n"
+            for playlist in available_playlists:
+                response += f"• {playlist}\n"
+        
+        if unavailable_playlists:
+            response += "\n❌ <b>Недоступные плейлисты:</b>\n"
+            for playlist_id in unavailable_playlists:
+                response += f"• {playlist_id}\n"
+        
+        bot.send_message(message.chat.id, response)
+
 # Команда проверки новых релизов
 @bot.message_handler(commands=['check'])
 def check_updates_command(message):
@@ -394,18 +400,43 @@ def show_queue(message):
         notify_admin_about_queue(queue_items)
 
 if __name__ == '__main__':
-    # Запускаем треды для периодических задач
-    periodic_check_thread = threading.Thread(target=run_periodic_check, daemon=True)
-    queue_check_thread = threading.Thread(target=run_queue_check, daemon=True)
-    
-    periodic_check_thread.start()
-    queue_check_thread.start()
-    
-    # Запускаем бота
-    while True:
-        try:
-            bot.polling(none_stop=True, interval=0, timeout=20)
-        except Exception as e:
-            logger.error(f"Ошибка бота: {e}")
-            logger.error(traceback.format_exc())
-            time.sleep(5)
+    # Проверка на единственность экземпляра
+    lock_file = 'bot.lock'
+    try:
+        if os.path.exists(lock_file):
+            logger.warning("Файл блокировки найден. Возможно, уже запущен другой экземпляр бота.")
+            logger.info("Попытка удалить старый файл блокировки...")
+            os.remove(lock_file)
+        
+        # Создаем файл блокировки
+        with open(lock_file, 'w') as f:
+            f.write(str(os.getpid()))
+        
+        # Запускаем треды для периодических задач
+        periodic_check_thread = threading.Thread(target=run_periodic_check, daemon=True)
+        queue_check_thread = threading.Thread(target=run_queue_check, daemon=True)
+        
+        periodic_check_thread.start()
+        queue_check_thread.start()
+        
+        # Запускаем бота
+        logger.info("Запуск бота...")
+        while True:
+            try:
+                bot.polling(none_stop=True, interval=0, timeout=20)
+            except telebot.apihelper.ApiTelegramException as e:
+                if e.error_code == 409:
+                    logger.error("Конфликт: обнаружен другой запущенный экземпляр бота. Ожидание 30 секунд...")
+                    time.sleep(30)
+                else:
+                    logger.error(f"Telegram API ошибка: {e}")
+                    logger.error(traceback.format_exc())
+                    time.sleep(5)
+            except Exception as e:
+                logger.error(f"Ошибка бота: {e}")
+                logger.error(traceback.format_exc())
+                time.sleep(5)
+    finally:
+        # Удаляем файл блокировки при выходе
+        if os.path.exists(lock_file):
+            os.remove(lock_file)
