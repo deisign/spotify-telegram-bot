@@ -107,7 +107,7 @@ def clear_queue():
 bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
 spotify_client_id = os.getenv('SPOTIFY_CLIENT_ID')
 spotify_client_secret = os.getenv('SPOTIFY_CLIENT_SECRET')
-admin_id = 6400164260  # Ваш Telegram ID
+admin_id = 7213866  # Ваш правильный Telegram ID
 channel_id = os.getenv('TELEGRAM_CHANNEL_ID')
 
 # Массив плейлистов (обновленный список)
@@ -273,9 +273,16 @@ def notify_admin_about_queue(queue_items):
     queue_text += f"Всего в очереди: {len(queue_items)} постов"
     bot.send_message(admin_id, queue_text)
 
+# Тестовая команда - доступна всем
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    logger.info(f"Команда /start от пользователя {message.from_user.id}")
+    bot.send_message(message.chat.id, "Бот работает! Ваш ID: " + str(message.from_user.id))
+
 # Команда редактирования очереди
 @bot.message_handler(commands=['queue_manage'])
 def manage_queue(message):
+    logger.debug(f"Команда /queue_manage от пользователя {message.from_user.id}")
     if message.from_user.id != admin_id:
         return
     
@@ -379,6 +386,8 @@ def show_queue(message):
     if message.from_user.id == admin_id:
         queue_items = get_queue()
         notify_admin_about_queue(queue_items)
+    else:
+        bot.send_message(message.chat.id, f"У вас нет доступа к этой команде. Ваш ID: {message.from_user.id}, а нужен: {admin_id}")
 
 if __name__ == '__main__':
     logger.info("Запуск бота...")
