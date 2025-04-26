@@ -4,17 +4,15 @@ from telebot import types
 import requests
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
-from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 import base64
 import pytz
 import time
-import atexit
 import logging
 import sqlite3
 import sys
 import traceback
-import json
+import threading
 
 # Настройка логгера
 logger = logging.getLogger(__name__)
@@ -27,7 +25,7 @@ logger.addHandler(handler)
 
 # Инициализация базы данных
 def init_db():
-    conn = sqlite3.connect('bot_data.db')
+    conn = sqlite3.connect('bot_data.db', check_same_thread=False)
     c = conn.cursor()
     
     # Создаем таблицу для хранения истории поста релизов
@@ -51,7 +49,7 @@ def init_db():
 
 # Проверка, был ли релиз уже запощен
 def is_release_posted(spotify_id):
-    conn = sqlite3.connect('bot_data.db')
+    conn = sqlite3.connect('bot_data.db', check_same_thread=False)
     c = conn.cursor()
     c.execute("SELECT * FROM posted_releases WHERE spotify_id = ?", (spotify_id,))
     result = c.fetchone()
@@ -60,7 +58,7 @@ def is_release_posted(spotify_id):
 
 # Отметить релиз как запощенный
 def mark_release_posted(spotify_id):
-    conn = sqlite3.connect('bot_data.db')
+    conn = sqlite3.connect('bot_data.db', check_same_thread=False)
     c = conn.cursor()
     c.execute("INSERT OR REPLACE INTO posted_releases (spotify_id, post_date) VALUES (?, ?)", 
               (spotify_id, datetime.now().isoformat()))
@@ -69,7 +67,7 @@ def mark_release_posted(spotify_id):
 
 # Добавление в очередь
 def add_to_queue(spotify_id, artist, title, image_url, spotify_link, query, post_time):
-    conn = sqlite3.connect('bot_data.db')
+    conn = sqlite3.connect('bot_data.db', check_same_thread=False)
     c = conn.cursor()
     try:
         c.execute('''INSERT OR IGNORE INTO queue 
@@ -84,7 +82,7 @@ def add_to_queue(spotify_id, artist, title, image_url, spotify_link, query, post
 
 # Получение очереди
 def get_queue():
-    conn = sqlite3.connect('bot_data.db')
+    conn = sqlite3.connect('bot_data.db', check_same_thread=False)
     c = conn.cursor()
     c.execute("SELECT * FROM queue ORDER BY post_time ASC")
     queue = c.fetchall()
@@ -93,7 +91,7 @@ def get_queue():
 
 # Удаление из очереди
 def remove_from_queue(queue_id):
-    conn = sqlite3.connect('bot_data.db')
+    conn = sqlite3.connect('bot_data.db', check_same_thread=False)
     c = conn.cursor()
     c.execute("DELETE FROM queue WHERE id = ?", (queue_id,))
     conn.commit()
@@ -101,7 +99,7 @@ def remove_from_queue(queue_id):
 
 # Очистка очереди
 def clear_queue():
-    conn = sqlite3.connect('bot_data.db')
+    conn = sqlite3.connect('bot_data.db', check_same_thread=False)
     c = conn.cursor()
     c.execute("DELETE FROM queue")
     conn.commit()
@@ -111,7 +109,7 @@ def clear_queue():
 bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
 spotify_client_id = os.getenv('SPOTIFY_CLIENT_ID')
 spotify_client_secret = os.getenv('SPOTIFY_CLIENT_SECRET')
-admin_id = int(os.getenv('TELEGRAM_ADMIN_ID'))
+admin_id = 6400164260  # Ваш Telegram ID
 channel_id = os.getenv('TELEGRAM_CHANNEL_ID')
 
 # Массив плейлистов
@@ -363,6 +361,17 @@ def check_and_post_from_queue():
         logger.error(f"Ошибка в check_and_post_from_queue: {e}")
         logger.error(traceback.format_exc())
 
+# Таймеры без APScheduler
+def run_periodic_check():
+    while True:
+        check_playlists_for_updates()
+        time.sleep(3 * 60 * 60)  # Каждые 3 часа
+
+def run_queue_check():
+    while True:
+        check_and_post_from_queue()
+        time.sleep(60)  # Каждую минуту
+
 # Команда проверки новых релизов
 @bot.message_handler(commands=['check'])
 def check_updates_command(message):
@@ -378,16 +387,15 @@ def show_queue(message):
         queue_items = get_queue()
         notify_admin_about_queue(queue_items)
 
-# Запуск планировщика
-scheduler = BackgroundScheduler(timezone="Europe/Moscow")
-scheduler.add_job(check_playlists_for_updates, 'interval', hours=3)
-scheduler.add_job(check_and_post_from_queue, 'interval', minutes=1)
-scheduler.start()
-
-# Остановка планировщика при выходе
-atexit.register(lambda: scheduler.shutdown())
-
 if __name__ == '__main__':
+    # Запускаем треды для периодических задач
+    periodic_check_thread = threading.Thread(target=run_periodic_check, daemon=True)
+    queue_check_thread = threading.Thread(target=run_queue_check, daemon=True)
+    
+    periodic_check_thread.start()
+    queue_check_thread.start()
+    
+    # Запускаем бота
     while True:
         try:
             bot.polling(none_stop=True, interval=0, timeout=20)
