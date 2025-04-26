@@ -2,3 +2,7 @@ spotipy==2.23.0
 pyTelegramBotAPI==4.14.0
 schedule==1.2.1
 python-dotenv==1.0.0
+telebot
+requests
+pytz
+apscheduler
