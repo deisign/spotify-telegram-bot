@@ -380,9 +380,21 @@ def show_queue(message):
 if __name__ == '__main__':
     logger.info("Запуск бота...")
     
+    # Очищаем webhook если он был установлен
+    try:
+        bot.remove_webhook()
+        logger.info("Webhook удален")
+    except:
+        pass
+    
     # Создаем простой цикл без потоков
     last_check_time = time.time()
     last_queue_check = time.time()
+    last_update_id = 0
+    
+    # Ждем перед запуском для решения проблем с конфликтами
+    logger.info("Ожидание 10 секунд перед запуском для предотвращения конфликтов...")
+    time.sleep(10)
     
     while True:
         try:
@@ -396,12 +408,27 @@ if __name__ == '__main__':
                 check_and_post_from_queue()
                 last_queue_check = time.time()
             
-            # Обрабатываем сообщения (один раз, без polling)
+            # Обрабатываем сообщения с учетом offset
             try:
-                updates = bot.get_updates(timeout=1, long_polling_timeout=1)
+                updates = bot.get_updates(offset=last_update_id + 1, timeout=1, long_polling_timeout=1)
                 if updates:
                     for update in updates:
+                        last_update_id = update.update_id
                         bot.process_new_updates([update])
+            except telebot.apihelper.ApiTelegramException as e:
+                if e.error_code == 409:
+                    logger.warning("Обнаружен конфликт. Ожидание 30 секунд...")
+                    time.sleep(30)
+                    # Сбрасываем offset
+                    try:
+                        updates = bot.get_updates(offset=-1, timeout=1)
+                        if updates:
+                            last_update_id = updates[-1].update_id
+                    except:
+                        pass
+                else:
+                    logger.error(f"Telegram API ошибка: {e}")
+                    time.sleep(5)
             except Exception as e:
                 logger.error(f"Ошибка при получении обновлений: {e}")
                 time.sleep(5)
