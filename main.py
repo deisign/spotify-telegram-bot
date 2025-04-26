@@ -337,6 +337,7 @@ def check_and_post_from_queue():
 # Команда проверки плейлистов
 @bot.message_handler(commands=['check_playlists'])
 def check_playlists_availability(message):
+    logger.debug(f"Команда /check_playlists от пользователя {message.from_user.id}")
     if message.from_user.id == admin_id:
         bot.send_message(message.chat.id, "Проверяю доступность плейлистов...")
         available_playlists = []
@@ -365,6 +366,7 @@ def check_playlists_availability(message):
 # Команда проверки новых релизов
 @bot.message_handler(commands=['check'])
 def check_updates_command(message):
+    logger.debug(f"Команда /check от пользователя {message.from_user.id}")
     if message.from_user.id == admin_id:
         bot.send_message(message.chat.id, "Проверяю новые релизы...")
         check_playlists_for_updates()
@@ -373,6 +375,7 @@ def check_updates_command(message):
 # Команда показа очереди
 @bot.message_handler(commands=['queue'])
 def show_queue(message):
+    logger.debug(f"Команда /queue от пользователя {message.from_user.id}")
     if message.from_user.id == admin_id:
         queue_items = get_queue()
         notify_admin_about_queue(queue_items)
@@ -384,57 +387,81 @@ if __name__ == '__main__':
     try:
         bot.remove_webhook()
         logger.info("Webhook удален")
-    except:
-        pass
-    
-    # Создаем простой цикл без потоков
-    last_check_time = time.time()
-    last_queue_check = time.time()
-    last_update_id = 0
+    except Exception as e:
+        logger.error(f"Ошибка при удалении webhook: {e}")
     
     # Ждем перед запуском для решения проблем с конфликтами
     logger.info("Ожидание 10 секунд перед запуском для предотвращения конфликтов...")
     time.sleep(10)
     
+    # Получаем последний update_id
+    try:
+        updates = bot.get_updates(timeout=1)
+        if updates:
+            last_update_id = updates[-1].update_id
+        else:
+            last_update_id = 0
+        logger.info(f"Начальный update_id: {last_update_id}")
+    except Exception as e:
+        logger.error(f"Ошибка при получении начального update_id: {e}")
+        last_update_id = 0
+    
+    last_check_time = time.time()
+    last_queue_check = time.time()
+    
+    logger.info("Бот запущен и готов к работе")
+    
     while True:
         try:
             # Проверяем плейлисты каждые 3 часа
             if time.time() - last_check_time > 3 * 60 * 60:
+                logger.info("Проверка плейлистов...")
                 check_playlists_for_updates()
                 last_check_time = time.time()
             
             # Проверяем очередь каждую минуту
             if time.time() - last_queue_check > 60:
+                logger.debug("Проверка очереди...")
                 check_and_post_from_queue()
                 last_queue_check = time.time()
             
-            # Обрабатываем сообщения с учетом offset
+            # Обрабатываем сообщения
             try:
-                updates = bot.get_updates(offset=last_update_id + 1, timeout=1, long_polling_timeout=1)
+                updates = bot.get_updates(offset=last_update_id + 1, timeout=1)
                 if updates:
+                    logger.debug(f"Получено {len(updates)} обновлений")
                     for update in updates:
                         last_update_id = update.update_id
-                        bot.process_new_updates([update])
+                        logger.debug(f"Обработка update_id: {last_update_id}")
+                        
+                        try:
+                            if update.message:
+                                logger.debug(f"Получено сообщение от {update.message.from_user.id}: {update.message.text}")
+                            elif update.callback_query:
+                                logger.debug(f"Получен callback от {update.callback_query.from_user.id}: {update.callback_query.data}")
+                            
+                            bot.process_new_updates([update])
+                        except Exception as e:
+                            logger.error(f"Ошибка при обработке обновления: {e}")
+                            logger.error(traceback.format_exc())
+                else:
+                    logger.debug("Нет новых обновлений")
+                
             except telebot.apihelper.ApiTelegramException as e:
                 if e.error_code == 409:
                     logger.warning("Обнаружен конфликт. Ожидание 30 секунд...")
                     time.sleep(30)
-                    # Сбрасываем offset
-                    try:
-                        updates = bot.get_updates(offset=-1, timeout=1)
-                        if updates:
-                            last_update_id = updates[-1].update_id
-                    except:
-                        pass
+                    continue
                 else:
                     logger.error(f"Telegram API ошибка: {e}")
                     time.sleep(5)
             except Exception as e:
                 logger.error(f"Ошибка при получении обновлений: {e}")
+                logger.error(traceback.format_exc())
                 time.sleep(5)
             
-            # Небольшая пауза, чтобы не перегружать процессор
-            time.sleep(1)
+            # Короткая пауза между проверками
+            time.sleep(0.5)
             
         except Exception as e:
             logger.error(f"Общая ошибка: {e}")
