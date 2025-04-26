@@ -394,76 +394,43 @@ if __name__ == '__main__':
     logger.info("Ожидание 10 секунд перед запуском для предотвращения конфликтов...")
     time.sleep(10)
     
-    # Получаем последний update_id
-    try:
-        updates = bot.get_updates(timeout=1)
-        if updates:
-            last_update_id = updates[-1].update_id
-        else:
-            last_update_id = 0
-        logger.info(f"Начальный update_id: {last_update_id}")
-    except Exception as e:
-        logger.error(f"Ошибка при получении начального update_id: {e}")
-        last_update_id = 0
+    # Запускаем периодические задачи в фоне
+    def background_tasks():
+        last_check_time = time.time()
+        last_queue_check = time.time()
+        
+        while True:
+            try:
+                # Проверяем плейлисты каждые 3 часа
+                if time.time() - last_check_time > 3 * 60 * 60:
+                    logger.info("Проверка плейлистов...")
+                    check_playlists_for_updates()
+                    last_check_time = time.time()
+                
+                # Проверяем очередь каждую минуту
+                if time.time() - last_queue_check > 60:
+                    logger.debug("Проверка очереди...")
+                    check_and_post_from_queue()
+                    last_queue_check = time.time()
+                
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"Ошибка в фоновых задачах: {e}")
+                logger.error(traceback.format_exc())
+                time.sleep(5)
     
-    last_check_time = time.time()
-    last_queue_check = time.time()
+    # Запускаем фоновые задачи в отдельном потоке
+    import threading
+    background_thread = threading.Thread(target=background_tasks, daemon=True)
+    background_thread.start()
     
+    # Запускаем бота с использованием polling
     logger.info("Бот запущен и готов к работе")
     
     while True:
         try:
-            # Проверяем плейлисты каждые 3 часа
-            if time.time() - last_check_time > 3 * 60 * 60:
-                logger.info("Проверка плейлистов...")
-                check_playlists_for_updates()
-                last_check_time = time.time()
-            
-            # Проверяем очередь каждую минуту
-            if time.time() - last_queue_check > 60:
-                logger.debug("Проверка очереди...")
-                check_and_post_from_queue()
-                last_queue_check = time.time()
-            
-            # Обрабатываем сообщения
-            try:
-                updates = bot.get_updates(offset=last_update_id + 1, timeout=1)
-                if updates:
-                    logger.debug(f"Получено {len(updates)} обновлений")
-                    for update in updates:
-                        last_update_id = update.update_id
-                        logger.debug(f"Обработка update_id: {last_update_id}")
-                        
-                        try:
-                            if update.message:
-                                logger.debug(f"Получено сообщение от {update.message.from_user.id}: {update.message.text}")
-                            elif update.callback_query:
-                                logger.debug(f"Получен callback от {update.callback_query.from_user.id}: {update.callback_query.data}")
-                            
-                            bot.process_new_updates([update])
-                        except Exception as e:
-                            logger.error(f"Ошибка при обработке обновления: {e}")
-                            logger.error(traceback.format_exc())
-                else:
-                    logger.debug("Нет новых обновлений")
-                
-            except telebot.apihelper.ApiTelegramException as e:
-                if e.error_code == 409:
-                    logger.warning("Обнаружен конфликт. Ожидание 30 секунд...")
-                    time.sleep(30)
-                    continue
-                else:
-                    logger.error(f"Telegram API ошибка: {e}")
-                    time.sleep(5)
-            except Exception as e:
-                logger.error(f"Ошибка при получении обновлений: {e}")
-                logger.error(traceback.format_exc())
-                time.sleep(5)
-            
-            # Короткая пауза между проверками
-            time.sleep(0.5)
-            
+            bot.polling(none_stop=True, interval=0, timeout=20)
         except Exception as e:
-            logger.error(f"Общая ошибка: {e}")
+            logger.error(f"Ошибка бота: {e}")
             logger.error(traceback.format_exc())
             time.sleep(5)
