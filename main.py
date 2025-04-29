@@ -459,6 +459,10 @@ if __name__ == '__main__':
     background_thread = threading.Thread(target=background_tasks, daemon=True)
     background_thread.start()
     
+    # Сразу запускаем проверку плейлистов при старте
+    logger.info("Запуск первичной проверки плейлистов...")
+    check_playlists_for_updates()
+    
     # Запускаем бота с использованием polling
     logger.info("Бот запущен и готов к работе")
     
