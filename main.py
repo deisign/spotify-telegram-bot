@@ -286,15 +286,50 @@ def post_to_channel(release_from_queue):
     try:
         queue_id, spotify_id, artist, title, image_url, spotify_link, query, post_time = release_from_queue
         
-        message_text = f"🆕 <b>{artist} - {title}</b>"
+        # Получаем дополнительную информацию об альбоме
+        album = sp.album(spotify_id)
         
+        # Определяем тип релиза (альбом или сингл)
+        release_type = album['album_type'].capitalize()
+        
+        # Получаем дату релиза
+        release_date = album['release_date']
+        
+        # Получаем количество треков
+        track_count = album['total_tracks']
+        
+        # Получаем жанры
+        artist_genres = []
+        for artist_item in album['artists']:
+            artist_info = sp.artist(artist_item['id'])
+            artist_genres.extend(artist_info['genres'])
+        
+        # Убираем дубликаты и сортируем
+        artist_genres = sorted(list(set(artist_genres)))
+        
+        # Формируем строку жанров с хэштегами
+        genre_text = ""
+        if artist_genres:
+            genre_hashtags = [f"#{genre.replace(' ', '')}" for genre in artist_genres[:3]]  # Ограничиваем до 3 жанров
+            genre_text = "Genre: " + ", ".join(genre_hashtags)
+        
+        # Формируем сообщение по требуемому формату
+        message_text = f"<b>{artist}</b>\n"
+        message_text += f"{title}\n"
+        message_text += f"{release_date}, {release_type}, {track_count} tracks\n"
+        
+        if genre_text:
+            message_text += f"{genre_text}\n"
+        
+        # Создаем кнопку для Spotify
         keyboard = types.InlineKeyboardMarkup()
         spotify_button = types.InlineKeyboardButton(
-            text="Слушать в Spotify",
+            text="Listen on Spotify",
             url=spotify_link
         )
         keyboard.add(spotify_button)
         
+        # Отправляем сообщение с обложкой альбома
         if image_url:
             response = requests.get(image_url)
             if response.status_code == 200:
