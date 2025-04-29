@@ -158,12 +158,14 @@ def check_followed_artists_releases():
         moscow_tz = pytz.timezone('Europe/Moscow')
         current_time = datetime.now(moscow_tz)
         
-        new_releases = []
-        days_ago = 3  # Ищем релизы за последние 3 дня
+        # Строго 3 дня назад
+        days_ago = 3
+        cutoff_date = current_time - timedelta(days=days_ago)
+        cutoff_date_str = cutoff_date.strftime('%Y-%m-%d')
         
-        logger.info(f"Поиск релизов за последние {days_ago} дней")
-        logger.info(f"Текущая дата: {current_time.strftime('%Y-%m-%d')}")
-        logger.info(f"Ищем релизы с: {(current_time - timedelta(days=days_ago)).strftime('%Y-%m-%d')}")
+        logger.info(f"Поиск релизов с {cutoff_date_str} по {current_time.strftime('%Y-%m-%d')}")
+        
+        new_releases = []
         
         # Получаем список исполнителей, на которых подписан пользователь
         try:
@@ -187,61 +189,81 @@ def check_followed_artists_releases():
                 artist_name = artist['name']
                 
                 try:
-                    # Получаем альбомы исполнителя
+                    # Получаем альбомы исполнителя, ограничиваем только недавними (10 последних)
                     albums = sp.artist_albums(artist_id, album_type='album,single', limit=10)
                     
                     for album in albums['items']:
                         release_date_str = album.get('release_date', '')
                         
-                        if release_date_str:
-                            release_date = None
-                            if len(release_date_str) == 10:  # YYYY-MM-DD
-                                release_date = datetime.strptime(release_date_str, '%Y-%m-%d')
-                                logger.debug(f"Найден альбом с датой {release_date_str}: {album['name']} - {artist_name}")
-                            elif len(release_date_str) == 7:  # YYYY-MM
-                                release_date = datetime.strptime(release_date_str + '-01', '%Y-%m-%d')
-                                logger.debug(f"Найден альбом с месяцем {release_date_str}: {album['name']} - {artist_name}")
-                            elif len(release_date_str) == 4:  # YYYY
+                        if not release_date_str:
+                            continue
+                        
+                        try:
+                            # Конвертируем строку даты к формату YYYY-MM-DD
+                            if len(release_date_str) == 4:  # Только год
                                 release_date = datetime.strptime(release_date_str + '-01-01', '%Y-%m-%d')
-                                logger.debug(f"Найден альбом с годом {release_date_str}: {album['name']} - {artist_name}")
+                                # Пропускаем релизы с только годом - они обычно старые
+                                logger.debug(f"Пропускаем релиз с только годом: {album['name']} ({release_date_str})")
+                                continue
+                            elif len(release_date_str) == 7:  # Год и месяц
+                                release_date = datetime.strptime(release_date_str + '-01', '%Y-%m-%d')
+                                # Если не текущий месяц и год, пропускаем
+                                if release_date.month != current_time.month or release_date.year != current_time.year:
+                                    logger.debug(f"Пропускаем релиз не текущего месяца: {album['name']} ({release_date_str})")
+                                    continue
+                            elif len(release_date_str) == 10:  # Полная дата
+                                release_date = datetime.strptime(release_date_str, '%Y-%m-%d')
+                            else:
+                                logger.warning(f"Неизвестный формат даты: {release_date_str}, пропускаем")
+                                continue
                             
-                            if release_date:
-                                release_date = moscow_tz.localize(release_date)
+                            # Локализуем даты в одну зону
+                            release_date = moscow_tz.localize(release_date)
+                            
+                            # Жесткая проверка, что дата релиза находится в диапазоне последних 3-х дней
+                            if release_date >= cutoff_date and release_date <= current_time:
                                 days_difference = (current_time - release_date).days
+                                logger.debug(f"Найден релиз в диапазоне дат: {album['name']} от {artist_name}, {days_difference} дней назад")
                                 
-                                logger.debug(f"Альбом {album['name']} от {artist_name} - {days_difference} дней назад")
+                                spotify_id = album['id']
                                 
-                                if 0 <= days_difference <= days_ago:
-                                    spotify_id = album['id']
-                                    
-                                    # Проверяем, не был ли уже запощен этот релиз
-                                    if not is_release_posted(spotify_id):
-                                        # Получаем треки из альбома для примера
-                                        try:
-                                            album_tracks = sp.album_tracks(spotify_id, limit=1)
+                                # Проверяем, не был ли уже запощен этот релиз
+                                if not is_release_posted(spotify_id):
+                                    # Получаем треки из альбома для примера
+                                    try:
+                                        album_tracks = sp.album_tracks(spotify_id, limit=1)
+                                        
+                                        if album_tracks['items']:
+                                            track = album_tracks['items'][0]
                                             
-                                            if album_tracks['items']:
-                                                track = album_tracks['items'][0]
-                                                
-                                                release_info = {
-                                                    'artist': artist_name,
-                                                    'title': album['name'],
-                                                    'track_name': track['name'],
-                                                    'image_url': album['images'][0]['url'] if album['images'] else None,
-                                                    'spotify_link': album['external_urls']['spotify'],
-                                                    'spotify_id': spotify_id,
-                                                    'release_date': release_date,
-                                                    'days_old': days_difference,
-                                                    'query': f"{track['name']} - {artist_name}"
-                                                }
-                                                new_releases.append(release_info)
-                                                logger.info(f"Найден новый релиз: {release_info['artist']} - {release_info['title']}, дата: {release_date_str}")
-                                        except Exception as e:
-                                            logger.error(f"Ошибка при получении треков для альбома {spotify_id}: {e}")
-                                    else:
-                                        logger.debug(f"Релиз уже отправлялся: {artist_name} - {album['name']}")
+                                            release_info = {
+                                                'artist': artist_name,
+                                                'title': album['name'],
+                                                'track_name': track['name'],
+                                                'image_url': album['images'][0]['url'] if album['images'] else None,
+                                                'spotify_link': album['external_urls']['spotify'],
+                                                'spotify_id': spotify_id,
+                                                'release_date': release_date,
+                                                'days_old': days_difference,
+                                                'query': f"{track['name']} - {artist_name}"
+                                            }
+                                            new_releases.append(release_info)
+                                            logger.info(f"Найден новый релиз: {release_info['artist']} - {release_info['title']}, дата: {release_date_str}")
+                                    except Exception as e:
+                                        logger.error(f"Ошибка при получении треков для альбома {spotify_id}: {e}")
                                 else:
-                                    logger.debug(f"Релиз слишком старый ({days_difference} дней): {artist_name} - {album['name']}")
+                                    logger.debug(f"Релиз уже отправлялся: {artist_name} - {album['name']}")
+                            else:
+                                # Если дата релиза до cutoff_date, значит релиз старый
+                                if release_date < cutoff_date:
+                                    logger.debug(f"Пропускаем старый релиз {artist_name} - {album['name']}: {release_date_str}")
+                                # Если дата в будущем - это пререлиз, его тоже пропускаем
+                                elif release_date > current_time:
+                                    logger.debug(f"Пропускаем будущий релиз {artist_name} - {album['name']}: {release_date_str}")
+                        
+                        except ValueError as date_error:
+                            logger.warning(f"Ошибка при обработке даты {release_date_str}: {date_error}")
+                            continue
                 
                 except Exception as e:
                     logger.error(f"Ошибка при обработке исполнителя {artist_name}: {e}")
@@ -286,40 +308,48 @@ def post_to_channel(release_from_queue):
     try:
         queue_id, spotify_id, artist, title, image_url, spotify_link, query, post_time = release_from_queue
         
-        # Получаем дополнительную информацию об альбоме
-        album = sp.album(spotify_id)
-        
-        # Определяем тип релиза (альбом или сингл)
-        release_type = album['album_type'].capitalize()
-        
-        # Получаем дату релиза
-        release_date = album['release_date']
-        
-        # Получаем количество треков
-        track_count = album['total_tracks']
-        
-        # Получаем жанры
-        artist_genres = []
-        for artist_item in album['artists']:
-            artist_info = sp.artist(artist_item['id'])
-            artist_genres.extend(artist_info['genres'])
-        
-        # Убираем дубликаты и сортируем
-        artist_genres = sorted(list(set(artist_genres)))
-        
-        # Формируем строку жанров с хэштегами
-        genre_text = ""
-        if artist_genres:
-            genre_hashtags = [f"#{genre.replace(' ', '')}" for genre in artist_genres[:3]]  # Ограничиваем до 3 жанров
-            genre_text = "Genre: " + ", ".join(genre_hashtags)
-        
-        # Формируем сообщение по требуемому формату
+        # Базовые данные для поста (на случай, если не получится получить дополнительную информацию)
         message_text = f"<b>{artist}</b>\n"
         message_text += f"{title}\n"
-        message_text += f"{release_date}, {release_type}, {track_count} tracks\n"
         
-        if genre_text:
-            message_text += f"{genre_text}\n"
+        try:
+            # Получаем дополнительную информацию об альбоме с таймаутом
+            album = sp.album(spotify_id)
+            
+            # Определяем тип релиза (альбом или сингл)
+            release_type = album['album_type'].capitalize() if 'album_type' in album else 'Release'
+            
+            # Получаем дату релиза
+            release_date = album.get('release_date', 'Unknown date')
+            
+            # Получаем количество треков
+            track_count = album.get('total_tracks', 0)
+            
+            # Добавляем информацию в сообщение
+            message_text += f"{release_date}, {release_type}, {track_count} tracks\n"
+            
+            # Пытаемся получить жанры с таймаутом
+            try:
+                artist_genres = []
+                # Ограничиваем количество запросов к API
+                for artist_item in album['artists'][:2]:  # Только для первых двух артистов
+                    artist_info = sp.artist(artist_item['id'])
+                    artist_genres.extend(artist_info.get('genres', []))
+                
+                # Убираем дубликаты и сортируем
+                artist_genres = sorted(list(set(artist_genres)))
+                
+                # Формируем строку жанров с хэштегами
+                if artist_genres:
+                    genre_hashtags = [f"#{genre.replace(' ', '').replace('-', '')}" for genre in artist_genres[:3]]  # Ограничиваем до 3 жанров
+                    message_text += "Genre: " + ", ".join(genre_hashtags) + "\n"
+            except Exception as genre_error:
+                logger.warning(f"Не удалось получить жанры: {genre_error}")
+                # Продолжаем без жанров
+        
+        except Exception as album_error:
+            logger.warning(f"Не удалось получить подробную информацию об альбоме, используем базовый формат: {album_error}")
+            # Продолжаем с базовым форматом
         
         # Создаем кнопку для Spotify
         keyboard = types.InlineKeyboardMarkup()
@@ -330,22 +360,26 @@ def post_to_channel(release_from_queue):
         keyboard.add(spotify_button)
         
         # Отправляем сообщение с обложкой альбома
-        if image_url:
-            response = requests.get(image_url)
-            if response.status_code == 200:
-                bot.send_photo(channel_id, photo=response.content, caption=message_text, reply_markup=keyboard)
+        try:
+            if image_url:
+                response = requests.get(image_url, timeout=10)  # Добавляем таймаут
+                if response.status_code == 200:
+                    bot.send_photo(channel_id, photo=response.content, caption=message_text, reply_markup=keyboard)
+                else:
+                    bot.send_message(channel_id, message_text, reply_markup=keyboard)
             else:
                 bot.send_message(channel_id, message_text, reply_markup=keyboard)
-        else:
-            bot.send_message(channel_id, message_text, reply_markup=keyboard)
-        
-        # Отмечаем как запощенный и удаляем из очереди
-        mark_release_posted(spotify_id)
-        remove_from_queue(queue_id)
-        logger.debug(f"Запостили релиз: {artist} - {title}")
+            
+            # Отмечаем как запощенный и удаляем из очереди только если сообщение было отправлено
+            mark_release_posted(spotify_id)
+            remove_from_queue(queue_id)
+            logger.debug(f"Успешно запостили релиз: {artist} - {title}")
+        except Exception as send_error:
+            logger.error(f"Ошибка при отправке сообщения в Telegram: {send_error}")
+            # Не удаляем из очереди при ошибке отправки
         
     except Exception as e:
-        logger.error(f"Ошибка при отправке поста: {e}")
+        logger.error(f"Критическая ошибка при отправке поста: {e}")
         logger.error(traceback.format_exc())
 
 # Уведомление админа о очереди
@@ -443,16 +477,32 @@ def check_updates_command(message):
         return
         
     check_message = bot.send_message(message.chat.id, "Проверяю новые релизы от подписанных исполнителей...")
-    check_followed_artists_releases()
-    queue_items = get_queue()
     
-    if queue_items:
-        bot.edit_message_text(f"Проверка завершена. Найдено {len(queue_items)} релизов в очереди.", 
-                              message.chat.id, check_message.message_id)
-        notify_admin_about_queue(queue_items)
-    else:
-        bot.edit_message_text("Проверка завершена. Новых релизов не найдено.", 
-                             message.chat.id, check_message.message_id)
+    # Запускаем проверку в отдельном потоке, чтобы не блокировать основной поток
+    def check_and_update():
+        try:
+            # Запускаем проверку
+            check_followed_artists_releases()
+            # Получаем обновленную очередь
+            queue_items = get_queue()
+            
+            # Отправляем результат
+            if queue_items:
+                bot.edit_message_text(f"Проверка завершена. Найдено {len(queue_items)} релизов в очереди.", 
+                                      message.chat.id, check_message.message_id)
+                notify_admin_about_queue(queue_items)
+            else:
+                bot.edit_message_text("Проверка завершена. Новых релизов не найдено.", 
+                                     message.chat.id, check_message.message_id)
+        except Exception as e:
+            logger.error(f"Ошибка при выполнении проверки: {e}")
+            bot.edit_message_text("Произошла ошибка при проверке релизов. Подробности в логах.", 
+                                 message.chat.id, check_message.message_id)
+    
+    # Запускаем проверку в отдельном потоке
+    check_thread = threading.Thread(target=check_and_update)
+    check_thread.daemon = True
+    check_thread.start()
 
 # Команда показа очереди
 @bot.message_handler(commands=['queue'])
@@ -596,10 +646,19 @@ if __name__ == '__main__':
     
     # Сразу запускаем проверку новых релизов при старте
     logger.info("Запуск первичной проверки релизов...")
-    check_followed_artists_releases()
+    
+    # НЕ блокируем основной поток для запуска проверки
+    check_thread = threading.Thread(target=check_followed_artists_releases, daemon=True)
+    check_thread.start()
     
     # Запускаем бота с использованием polling
     logger.info("Бот запущен и готов к работе")
     
     # Используем polling без потоков
-    bot.infinity_polling(allowed_updates=["message", "callback_query"], timeout=20)
+    while True:
+        try:
+            bot.polling(none_stop=True, interval=1, timeout=20)
+        except Exception as e:
+            logger.error(f"Ошибка в polling: {e}")
+            logger.error(traceback.format_exc())
+            time.sleep(5)
