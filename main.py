@@ -135,18 +135,22 @@ init_db()
 # Функция проверки плейлистов
 def check_playlists_for_updates():
     try:
-        logger.debug("Проверка плейлистов на новые релизы")
+        logger.info("Проверка плейлистов на новые релизы")
         moscow_tz = pytz.timezone('Europe/Moscow')
         current_time = datetime.now(moscow_tz)
         
         new_releases = []
-        days_ago = 3  # Идем на 3 дня назад
+        days_ago = 3  # Ищем релизы за последние 3 дня
+        
+        logger.info(f"Поиск релизов за последние {days_ago} дней")
+        logger.info(f"Текущая дата: {current_time.strftime('%Y-%m-%d')}")
+        logger.info(f"Ищем релизы с: {(current_time - timedelta(days=days_ago)).strftime('%Y-%m-%d')}")
         
         for playlist_id in playlist_ids:
             try:
                 playlist = sp.playlist(playlist_id)
                 playlist_name = playlist['name']
-                logger.debug(f"Проверка плейлиста: {playlist_name}")
+                logger.info(f"Проверка плейлиста: {playlist_name} (ID: {playlist_id})")
                 
                 for item in playlist['tracks']['items']:
                     track = item['track']
@@ -155,14 +159,21 @@ def check_playlists_for_updates():
                         
                         if release_date_str:
                             release_date = None
-                            if len(release_date_str) == 10:
+                            if len(release_date_str) == 10:  # YYYY-MM-DD
                                 release_date = datetime.strptime(release_date_str, '%Y-%m-%d')
-                            elif len(release_date_str) == 7:
+                                logger.debug(f"Найден трек с датой {release_date_str}: {track['name']} - {track['artists'][0]['name']}")
+                            elif len(release_date_str) == 7:  # YYYY-MM
                                 release_date = datetime.strptime(release_date_str + '-01', '%Y-%m-%d')
+                                logger.debug(f"Найден трек с месяцем {release_date_str}: {track['name']} - {track['artists'][0]['name']}")
+                            elif len(release_date_str) == 4:  # YYYY
+                                release_date = datetime.strptime(release_date_str + '-01-01', '%Y-%m-%d')
+                                logger.debug(f"Найден трек с годом {release_date_str}: {track['name']} - {track['artists'][0]['name']}")
                             
                             if release_date:
                                 release_date = moscow_tz.localize(release_date)
                                 days_difference = (current_time - release_date).days
+                                
+                                logger.debug(f"Трек {track['name']} от {track['artists'][0]['name']} - {days_difference} дней назад")
                                 
                                 if 0 <= days_difference <= days_ago:
                                     spotify_id = track['album']['id']
@@ -182,7 +193,11 @@ def check_playlists_for_updates():
                                                 'query': f"{track['name']} - {track['artists'][0]['name']}"
                                             }
                                             new_releases.append(release_info)
-                                            logger.debug(f"Найден новый релиз: {release_info['artist']} - {release_info['title']}")
+                                            logger.info(f"Найден новый релиз: {release_info['artist']} - {release_info['title']}, дата: {release_date_str}")
+                                    else:
+                                        logger.debug(f"Релиз уже отправлялся: {track['artists'][0]['name']} - {track['name']}")
+                                else:
+                                    logger.debug(f"Релиз слишком старый ({days_difference} дней): {track['artists'][0]['name']} - {track['name']}")
             
             except spotipy.exceptions.SpotifyException as e:
                 if e.http_status == 404:
@@ -197,7 +212,7 @@ def check_playlists_for_updates():
         
         # Добавляем только новые релизы в очередь
         if new_releases:
-            logger.debug(f"Найдено {len(new_releases)} новых релизов. Добавляем в очередь.")
+            logger.info(f"Найдено {len(new_releases)} новых релизов. Добавляем в очередь.")
             sorted_releases = sorted(new_releases, key=lambda x: x['release_date'], reverse=True)
             
             queue_start_time = datetime.now(moscow_tz) + timedelta(minutes=5)
@@ -213,12 +228,13 @@ def check_playlists_for_updates():
                     release['query'],
                     post_time.isoformat()
                 )
+                logger.info(f"Добавлен в очередь: {release['artist']} - {release['title']}, запланировано на: {post_time.strftime('%H:%M, %d.%m')}")
             
             # Отправляем уведомление админу
             queue_info = get_queue()
             notify_admin_about_queue(queue_info)
         else:
-            logger.debug("Новых релизов не найдено")
+            logger.info("Новых релизов не найдено")
                 
     except Exception as e:
         logger.error(f"Ошибка в check_playlists_for_updates: {e}")
@@ -375,9 +391,19 @@ def check_playlists_availability(message):
 def check_updates_command(message):
     logger.debug(f"Команда /check от пользователя {message.from_user.id}")
     if message.from_user.id == admin_id:
-        bot.send_message(message.chat.id, "Проверяю новые релизы...")
+        check_message = bot.send_message(message.chat.id, "Проверяю новые релизы...")
         check_playlists_for_updates()
-        bot.send_message(message.chat.id, "Проверка завершена")
+        queue_items = get_queue()
+        
+        if queue_items:
+            bot.edit_message_text(f"Проверка завершена. Найдено {len(queue_items)} релизов в очереди.", 
+                                  message.chat.id, check_message.message_id)
+            notify_admin_about_queue(queue_items)
+        else:
+            bot.edit_message_text("Проверка завершена. Новых релизов не найдено.", 
+                                 message.chat.id, check_message.message_id)
+    else:
+        bot.send_message(message.chat.id, f"У вас нет доступа к этой команде. Ваш ID: {message.from_user.id}, а нужен: {admin_id}")
 
 # Команда показа очереди
 @bot.message_handler(commands=['queue'])
