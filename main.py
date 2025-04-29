@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import traceback
 import threading
+import json
 
 # Настройка логгера
 logger = logging.getLogger(__name__)
@@ -108,41 +109,39 @@ def clear_queue():
 bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
 spotify_client_id = os.getenv('SPOTIFY_CLIENT_ID')
 spotify_client_secret = os.getenv('SPOTIFY_CLIENT_SECRET')
-spotify_redirect_uri = os.getenv('SPOTIFY_REDIRECT_URI', 'http://localhost:8888/callback')
-admin_id = 7213866  # Ваш Telegram ID
+spotify_refresh_token = os.getenv('SPOTIFY_REFRESH_TOKEN')  # Предварительно полученный refresh_token
+admin_id = int(os.getenv('TELEGRAM_ADMIN_ID', '7213866'))  # Получаем из переменных окружения или используем значение по умолчанию
 channel_id = os.getenv('TELEGRAM_CHANNEL_ID')
 
-# Инициализация Spotify клиента с OAuth для личного аккаунта
-# Это позволит получать данные из вашей персональной подписки
-sp_oauth = SpotifyOAuth(
-    client_id=spotify_client_id,
-    client_secret=spotify_client_secret,
-    redirect_uri=spotify_redirect_uri,
-    scope="user-follow-read user-library-read",
-    cache_path=".spotify_cache"
-)
-
-# Проверка и обновление токена
+# Инициализация Spotify клиента через OAuth с сохраненным refresh token
 try:
-    token_info = sp_oauth.get_cached_token()
-    if not token_info or sp_oauth.is_token_expired(token_info):
-        logger.info("Токен истек или отсутствует, обновляем...")
-        if token_info and 'refresh_token' in token_info:
-            token_info = sp_oauth.refresh_access_token(token_info['refresh_token'])
-        else:
-            auth_url = sp_oauth.get_authorize_url()
-            logger.info(f"Пожалуйста, перейдите по ссылке для авторизации: {auth_url}")
-            response = input("Введите URL, на который вы были перенаправлены: ")
-            code = sp_oauth.parse_response_code(response)
-            token_info = sp_oauth.get_access_token(code)
-    sp = spotipy.Spotify(auth=token_info['access_token'])
+    # Создаем объект OAuth
+    sp_oauth = SpotifyOAuth(
+        client_id=spotify_client_id,
+        client_secret=spotify_client_secret,
+        redirect_uri="http://localhost:8888/callback",  # Любой URI, не используется при refreshing
+        scope="user-follow-read user-library-read",
+        open_browser=False
+    )
+    
+    # Обновляем токен напрямую с использованием refresh token
+    token_info = sp_oauth.refresh_access_token(spotify_refresh_token)
+    access_token = token_info['access_token']
+    
+    # Инициализируем клиент Spotify с полученным токеном
+    sp = spotipy.Spotify(auth=access_token)
     logger.info("Spotify авторизация успешна")
+    
+    # Проверяем, что авторизация работает
+    current_user = sp.current_user()
+    logger.info(f"Авторизован как: {current_user['display_name']} (ID: {current_user['id']})")
+    
 except Exception as e:
-    logger.error(f"Ошибка авторизации Spotify: {e}")
+    logger.error(f"Ошибка при инициализации Spotify: {e}")
     logger.error(traceback.format_exc())
     sp = None
 
-# Инициализация бота - ОТКЛЮЧАЕМ МНОГОПОТОЧНОСТЬ
+# Инициализация бота - отключаем многопоточность для решения проблемы с конфликтами
 bot = telebot.TeleBot(bot_token, parse_mode='HTML', threaded=False)
 
 # Инициализация БД
@@ -152,7 +151,7 @@ init_db()
 def check_followed_artists_releases():
     try:
         if not sp:
-            logger.error("Spotify клиент не инициализирован")
+            logger.error("Spotify клиент не инициализирован, пропускаем проверку")
             return
         
         logger.info("Проверка новых релизов от подписанных исполнителей")
@@ -323,7 +322,7 @@ def notify_admin_about_queue(queue_items):
     queue_text = "📋 <b>Очередь постов:</b>\n\n"
     
     for item in queue_items:
-        queue_id, spotify_id, artist, title, _, _, query, post_time = item
+        queue_id, spotify_id, artist, title, _, _, _, post_time = item
         post_datetime = datetime.fromisoformat(post_time)
         formatted_time = post_datetime.strftime('%H:%M, %d.%m')
         queue_text += f"{queue_id}. {artist} - {title}\n📅 {formatted_time}\n\n"
@@ -479,6 +478,35 @@ def debug_command(message):
     
     bot.send_message(message.chat.id, debug_text)
 
+# Команда для обновления токена Spotify вручную
+@bot.message_handler(commands=['refresh_token'])
+def refresh_token_command(message):
+    logger.debug(f"Команда /refresh_token от пользователя {message.from_user.id}")
+    if message.from_user.id != admin_id:
+        bot.send_message(message.chat.id, f"У вас нет доступа к этой команде. Ваш ID: {message.from_user.id}, а нужен: {admin_id}")
+        return
+        
+    try:
+        global sp
+        
+        # Обновляем токен вручную
+        token_info = sp_oauth.refresh_access_token(spotify_refresh_token)
+        access_token = token_info['access_token']
+        
+        # Переинициализируем клиент Spotify
+        sp = spotipy.Spotify(auth=access_token)
+        
+        # Проверяем, что авторизация работает
+        current_user = sp.current_user()
+        
+        bot.send_message(message.chat.id, 
+                         f"✅ Токен успешно обновлен!\n\n"
+                         f"Пользователь: {current_user['display_name']} (ID: {current_user['id']})")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Ошибка при обновлении токена: {str(e)}")
+        logger.error(f"Ошибка при обновлении токена: {e}")
+        logger.error(traceback.format_exc())
+
 if __name__ == '__main__':
     logger.info("Запуск бота...")
     
@@ -489,13 +517,26 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"Ошибка при удалении webhook: {e}")
     
-    # Запускаем периодические задачи в фоне
-    def background_tasks():
+    # Периодические задачи
+    def run_background_tasks():
         last_check_time = time.time()
         last_queue_check = time.time()
+        last_token_refresh = time.time()
         
         while True:
             try:
+                # Обновляем токен каждый час
+                if time.time() - last_token_refresh > 60 * 60:
+                    logger.info("Обновляем токен Spotify...")
+                    try:
+                        token_info = sp_oauth.refresh_access_token(spotify_refresh_token)
+                        global sp
+                        sp = spotipy.Spotify(auth=token_info['access_token'])
+                        logger.info("Токен Spotify успешно обновлен")
+                    except Exception as e:
+                        logger.error(f"Ошибка при обновлении токена: {e}")
+                    last_token_refresh = time.time()
+                
                 # Проверяем новые релизы каждые 3 часа
                 if time.time() - last_check_time > 3 * 60 * 60:
                     logger.info("Проверка новых релизов...")
@@ -515,8 +556,7 @@ if __name__ == '__main__':
                 time.sleep(5)
     
     # Запускаем фоновые задачи в отдельном потоке
-    import threading
-    background_thread = threading.Thread(target=background_tasks, daemon=True)
+    background_thread = threading.Thread(target=run_background_tasks, daemon=True)
     background_thread.start()
     
     # Сразу запускаем проверку новых релизов при старте
@@ -526,10 +566,5 @@ if __name__ == '__main__':
     # Запускаем бота с использованием polling
     logger.info("Бот запущен и готов к работе")
     
-    while True:
-        try:
-            bot.polling(none_stop=True, interval=0, timeout=20)
-        except Exception as e:
-            logger.error(f"Ошибка бота: {e}")
-            logger.error(traceback.format_exc())
-            time.sleep(5)
+    # Используем polling без потоков
+    bot.infinity_polling(allowed_updates=["message", "callback_query"], timeout=20)
