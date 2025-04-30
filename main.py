@@ -332,16 +332,12 @@ def post_to_channel(release_from_queue):
     try:
         queue_id, spotify_id, artist, title, image_url, spotify_link, query, post_time = release_from_queue
         
-        # Базовые данные для поста (на случай, если не получится получить дополнительную информацию)
-        message_text = f"<b>{artist}</b>\n"
-        message_text += f"{title}\n"
-        
+        # Получаем дополнительную информацию об альбоме
         try:
-            # Получаем дополнительную информацию об альбоме с таймаутом
             album = sp.album(spotify_id)
             
             # Определяем тип релиза (альбом или сингл)
-            release_type = album['album_type'].capitalize() if 'album_type' in album else 'Release'
+            release_type = album.get('album_type', 'Unknown').capitalize()
             
             # Получаем дату релиза
             release_date = album.get('release_date', 'Unknown date')
@@ -349,31 +345,38 @@ def post_to_channel(release_from_queue):
             # Получаем количество треков
             track_count = album.get('total_tracks', 0)
             
-            # Добавляем информацию в сообщение
-            message_text += f"{release_date}, {release_type}, {track_count} tracks\n"
-            
-            # Пытаемся получить жанры с таймаутом
-            try:
-                artist_genres = []
-                # Ограничиваем количество запросов к API
-                for artist_item in album['artists'][:2]:  # Только для первых двух артистов
+            # Получаем жанры
+            artist_genres = []
+            for artist_item in album.get('artists', [])[:2]:  # Только первые два артиста для экономии запросов
+                try:
                     artist_info = sp.artist(artist_item['id'])
                     artist_genres.extend(artist_info.get('genres', []))
-                
-                # Убираем дубликаты и сортируем
-                artist_genres = sorted(list(set(artist_genres)))
-                
-                # Формируем строку жанров с хэштегами
-                if artist_genres:
-                    genre_hashtags = [f"#{genre.replace(' ', '').replace('-', '')}" for genre in artist_genres[:3]]  # Ограничиваем до 3 жанров
-                    message_text += "Genre: " + ", ".join(genre_hashtags) + "\n"
-            except Exception as genre_error:
-                logger.warning(f"Не удалось получить жанры: {genre_error}")
-                # Продолжаем без жанров
-        
+                except Exception as genre_error:
+                    logger.warning(f"Не удалось получить жанры для артиста {artist_item['name']}: {genre_error}")
+                    continue
+            
+            # Убираем дубликаты и сортируем
+            artist_genres = sorted(list(set(artist_genres)))
+            
+            # Формируем строку жанров с хэштегами
+            genre_text = ""
+            if artist_genres:
+                genre_hashtags = [f"#{genre.replace(' ', '').replace('-', '')}" for genre in artist_genres[:3]]  # Ограничиваем до 3 жанров
+                genre_text = f"Genre: {', '.join(genre_hashtags)}"
         except Exception as album_error:
-            logger.warning(f"Не удалось получить подробную информацию об альбоме, используем базовый формат: {album_error}")
-            # Продолжаем с базовым форматом
+            logger.warning(f"Не удалось получить информацию об альбоме {spotify_id}: {album_error}")
+            release_type = "Unknown"
+            release_date = "Unknown date"
+            track_count = 0
+            genre_text = ""
+        
+        # Формируем текст сообщения строго по формату
+        message_text = f"{artist}\n"  # Имя артиста
+        message_text += f"{title}\n"  # Название релиза
+        message_text += f"{release_date}, {release_type}, {track_count} tracks\n"  # Информация о релизе
+        
+        if genre_text:
+            message_text += f"{genre_text}\n"  # Жанры с хэштегами
         
         # Создаем кнопку для Spotify
         keyboard = types.InlineKeyboardMarkup()
@@ -384,23 +387,24 @@ def post_to_channel(release_from_queue):
         keyboard.add(spotify_button)
         
         # Отправляем сообщение с обложкой альбома
-        try:
-            if image_url:
-                response = requests.get(image_url, timeout=10)  # Добавляем таймаут
+        if image_url:
+            try:
+                response = requests.get(image_url, timeout=10)
                 if response.status_code == 200:
                     bot.send_photo(channel_id, photo=response.content, caption=message_text, reply_markup=keyboard)
                 else:
+                    # Если не удалось загрузить обложку
                     bot.send_message(channel_id, message_text, reply_markup=keyboard)
-            else:
+            except Exception as img_error:
+                logger.warning(f"Ошибка при загрузке обложки: {img_error}")
                 bot.send_message(channel_id, message_text, reply_markup=keyboard)
-            
-            # Отмечаем как запощенный и удаляем из очереди только если сообщение было отправлено
-            mark_release_posted(spotify_id)
-            remove_from_queue(queue_id)
-            logger.debug(f"Успешно запостили релиз: {artist} - {title}")
-        except Exception as send_error:
-            logger.error(f"Ошибка при отправке сообщения в Telegram: {send_error}")
-            # Не удаляем из очереди при ошибке отправки
+        else:
+            bot.send_message(channel_id, message_text, reply_markup=keyboard)
+        
+        # Отмечаем как запощенный и удаляем из очереди
+        mark_release_posted(spotify_id)
+        remove_from_queue(queue_id)
+        logger.debug(f"Успешно запостили релиз: {artist} - {title}")
         
     except Exception as e:
         logger.error(f"Критическая ошибка при отправке поста: {e}")
