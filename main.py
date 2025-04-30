@@ -370,9 +370,9 @@ def post_to_channel(release_from_queue):
             track_count = 0
             genre_text = ""
         
-        # Формируем текст сообщения строго по формату
-        message_text = f"{artist}\n"  # Имя артиста
-        message_text += f"{title}\n"  # Название релиза
+        # Формируем текст сообщения по заданному формату
+        message_text = f"{artist}\n"  # Артист
+        message_text += f"{title}\n"  # Релиз
         message_text += f"{release_date}, {release_type}, {track_count} tracks\n"  # Информация о релизе
         
         if genre_text:
