@@ -164,21 +164,9 @@ def check_followed_artists_releases():
         cutoff_date_str = cutoff_date.strftime('%Y-%m-%d')
         
         logger.info(f"Поиск релизов с {cutoff_date_str} по {current_time.strftime('%Y-%m-%d')}")
+        logger.info(f"Текущий год: {current_time.year}")
         
         new_releases = []
-        
-        # Определяем начало предыдущего месяца для проверки релизов на стыке месяцев
-        prev_month_start = None
-        if current_time.day <= 3:  # Если сейчас начало месяца
-            # Получаем предыдущий месяц
-            if current_time.month == 1:  # Январь
-                prev_month = 12
-                prev_year = current_time.year - 1
-            else:
-                prev_month = current_time.month - 1
-                prev_year = current_time.year
-            prev_month_start = f"{prev_year}-{prev_month:02d}"
-            logger.info(f"Начало месяца, также проверяем релизы с конца предыдущего месяца: {prev_month_start}")
         
         # Получаем список исполнителей, на которых подписан пользователь
         try:
@@ -197,7 +185,14 @@ def check_followed_artists_releases():
             logger.info(f"Найдено {len(followed_artists)} подписанных исполнителей")
             
             # Проверяем новые релизы для каждого исполнителя
+            artist_count = 0
             for artist in followed_artists:
+                artist_count += 1
+                # Обрабатываем только первые 100 исполнителей для экономии времени и ресурсов
+                if artist_count > 100:
+                    logger.info(f"Достигнут лимит в 100 исполнителей, пропускаем остальных")
+                    break
+                    
                 artist_id = artist['id']
                 artist_name = artist['name']
                 
@@ -212,45 +207,44 @@ def check_followed_artists_releases():
                             continue
                         
                         try:
-                            # Конвертируем строку даты к формату YYYY-MM-DD
-                            if len(release_date_str) == 4:  # Только год
-                                # Если год текущий, всё равно проверяем
-                                if release_date_str == str(current_time.year):
-                                    release_date = datetime.strptime(release_date_str + '-01-01', '%Y-%m-%d')
-                                    logger.debug(f"Релиз текущего года: {album['name']} ({release_date_str})")
-                                else:
-                                    logger.debug(f"Пропускаем релиз прошлых лет: {album['name']} ({release_date_str})")
+                            # Парсим дату релиза и проверяем, что она действительно в этом году
+                            if len(release_date_str) == 4:  # Только год (YYYY)
+                                year = int(release_date_str)
+                                if year != current_time.year:
+                                    logger.debug(f"Пропускаем релиз с другим годом: {album['name']} ({release_date_str})")
                                     continue
+                                # Для релизов с указанием только года используем 1 января
+                                release_date = datetime(year, 1, 1)
                             elif len(release_date_str) == 7:  # Год и месяц (YYYY-MM)
-                                # Проверяем текущий месяц
-                                current_month_str = f"{current_time.year}-{current_time.month:02d}"
+                                year, month = map(int, release_date_str.split('-'))
+                                if year != current_time.year:
+                                    logger.debug(f"Пропускаем релиз с другим годом: {album['name']} ({release_date_str})")
+                                    continue
                                 
-                                # Если месяц текущий ИЛИ это предыдущий месяц в начале текущего
-                                if release_date_str == current_month_str or (prev_month_start and release_date_str == prev_month_start):
-                                    release_date = datetime.strptime(release_date_str + '-01', '%Y-%m-%d')
-                                    # Для предыдущего месяца берем последний день
-                                    if prev_month_start and release_date_str == prev_month_start:
-                                        # Определяем последний день предыдущего месяца
-                                        next_month = datetime.strptime(release_date_str + '-01', '%Y-%m-%d') + timedelta(days=32)
-                                        next_month = next_month.replace(day=1)
-                                        last_day = next_month - timedelta(days=1)
-                                        release_date = last_day
-                                else:
+                                # Если текущий месяц или предыдущий (если мы в начале месяца)
+                                if month != current_time.month and not (current_time.day <= 3 and month == current_time.month - 1):
                                     logger.debug(f"Пропускаем релиз не текущего месяца: {album['name']} ({release_date_str})")
                                     continue
+                                
+                                # Для релизов текущего месяца берем 1 число
+                                release_date = datetime(year, month, 1)
                             elif len(release_date_str) == 10:  # Полная дата (YYYY-MM-DD)
                                 release_date = datetime.strptime(release_date_str, '%Y-%m-%d')
                             else:
                                 logger.warning(f"Неизвестный формат даты: {release_date_str}, пропускаем")
                                 continue
                             
-                            # Локализуем даты в одну зону
+                            # Локализуем дату для корректного сравнения
                             release_date = moscow_tz.localize(release_date)
                             
-                            # Проверка с использованием разницы в днях напрямую
-                            days_difference = (current_time - release_date).days
+                            # Рассчитываем разницу в днях напрямую
+                            delta = current_time - release_date
+                            days_difference = delta.days
                             
-                            # Упрощенное условие: выпущен за последние 3 дня
+                            # Дебаг информация о разнице
+                            logger.debug(f"Альбом {album['name']} от {artist_name} - дата: {release_date_str}, разница: {days_difference} дней")
+                            
+                            # Проверяем, что релиз вышел не более 3 дней назад
                             if 0 <= days_difference <= days_ago:
                                 logger.info(f"Найден релиз в диапазоне дат: {album['name']} от {artist_name}, {days_difference} дней назад")
                                 
@@ -290,6 +284,9 @@ def check_followed_artists_releases():
                         
                         except ValueError as date_error:
                             logger.warning(f"Ошибка при обработке даты {release_date_str}: {date_error}")
+                            continue
+                        except Exception as parsing_error:
+                            logger.warning(f"Общая ошибка при обработке релиза {album['name']}: {parsing_error}")
                             continue
                 
                 except Exception as e:
@@ -629,6 +626,13 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"Ошибка при удалении webhook: {e}")
     
+    # Проверяем, что бот единственный экземпляр
+    try:
+        bot.delete_webhook()
+        logger.info("Webhook удален (метод delete_webhook)")
+    except Exception as e:
+        logger.error(f"Ошибка при удалении webhook альтернативным методом: {e}")
+    
     # Периодические задачи
     def run_background_tasks():
         last_check_time = time.time()
@@ -681,11 +685,14 @@ if __name__ == '__main__':
     # Запускаем бота с использованием polling
     logger.info("Бот запущен и готов к работе")
     
-    # Используем polling без потоков
+    # Создаем отдельные сессии для Telegram API
     while True:
         try:
-            bot.polling(none_stop=True, interval=1, timeout=20)
+            # Это запускает новый процесс polling с новым соединением
+            bot.stop_polling()
+            time.sleep(1)
+            bot.polling(none_stop=True, interval=3, timeout=30)
         except Exception as e:
             logger.error(f"Ошибка в polling: {e}")
             logger.error(traceback.format_exc())
-            time.sleep(5)
+            time.sleep(10)  # Увеличиваем паузу при ошибках
