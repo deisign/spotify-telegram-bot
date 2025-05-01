@@ -21,7 +21,23 @@ SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 SPOTIFY_REDIRECT_URI = os.environ.get('SPOTIFY_REDIRECT_URI')
 SPOTIFY_REFRESH_TOKEN = os.environ.get('SPOTIFY_REFRESH_TOKEN')
 
+# Проверяем наличие токена бота
+if not TELEGRAM_TOKEN:
+    logger.error("TELEGRAM_TOKEN не найден в переменных окружения!")
+    # Выводим все переменные окружения для диагностики (без значений токенов)
+    for key in os.environ:
+        value = os.environ[key]
+        # Скрываем чувствительные данные
+        if 'TOKEN' in key or 'SECRET' in key:
+            logger.info(f"Переменная окружения: {key} = ***")
+        else:
+            logger.info(f"Переменная окружения: {key} = {value}")
+    
+    # Можно использовать тестовый токен для отладки или просто завершить программу
+    raise ValueError("TELEGRAM_TOKEN не определен в переменных окружения!")
+
 # Инициализация бота Telegram
+logger.info(f"Инициализация бота с токеном (первые 5 символов): {TELEGRAM_TOKEN[:5]}***")
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 # Инициализация Spotify OAuth
