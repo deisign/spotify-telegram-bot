@@ -1,6 +1,20 @@
-# В начало файла добавляем блокировку файла
+import logging
+import time
+import threading
+import traceback
+import os
 import fcntl
 import sys
+import spotipy
+import telebot
+from spotipy.oauth2 import SpotifyOAuth
+
+# Настройка логгера
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Функция для проверки, что запущен только один экземпляр
 def ensure_single_instance():
@@ -25,13 +39,6 @@ def ensure_single_instance():
         # Не удалось получить блокировку, значит другой экземпляр уже запущен
         logger.error("Другой экземпляр бота уже запущен. Завершаем работу.")
         return False
-
-# Настройка логгера
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # Получаем данные из переменных окружения Railway
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')  # Исправлено имя переменной
@@ -220,7 +227,6 @@ def clear_queue(message):
     queue = []
     
     bot.reply_to(message, f"✅ Очередь очищена. Удалено элементов: {queue_size}")
-
 
 @bot.message_handler(commands=['status'])
 def bot_status(message):
