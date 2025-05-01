@@ -290,14 +290,11 @@ if __name__ == '__main__':
     # Запускаем бота с использованием polling
     logger.info("Бот запущен и готов к работе")
     
-    # Создаем отдельные сессии для Telegram API
-    while True:
-        try:
-            # Это запускает новый процесс polling с новым соединением
-            bot.stop_polling()
-            time.sleep(1)
-            bot.polling(none_stop=True, interval=3, timeout=30)
-        except Exception as e:
-            logger.error(f"Ошибка в polling: {e}")
-            logger.error(traceback.format_exc())
-            time.sleep(10)  # Увеличиваем паузу при ошибках
+    # Используем бесконечный цикл с одним экземпляром polling
+    # Вместо множественных вызовов bot.polling
+    try:
+        logger.info("Запуск единственного экземпляра polling")
+        bot.polling(none_stop=True, interval=1, timeout=60)
+    except Exception as e:
+        logger.error(f"Критическая ошибка в polling: {e}")
+        logger.error(traceback.format_exc())
