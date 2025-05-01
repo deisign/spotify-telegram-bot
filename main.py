@@ -69,6 +69,39 @@ def check_and_post_from_queue():
     except Exception as e:
         logger.error(f"Ошибка при обработке очереди: {e}")
 
+# Обработчики команд Telegram
+@bot.message_handler(commands=['start', 'help'])
+def send_welcome(message):
+    logger.info(f"Получена команда /start или /help от пользователя {message.from_user.id}")
+    bot.reply_to(message, "Привет! Я бот для отслеживания новых релизов на Spotify. Используйте /help для получения списка команд.")
+
+@bot.message_handler(commands=['check'])
+def force_check(message):
+    logger.info(f"Получена команда /check от пользователя {message.from_user.id}")
+    bot.reply_to(message, "Запускаю проверку новых релизов...")
+    
+    # Запускаем проверку в отдельном потоке, чтобы не блокировать бота
+    check_thread = threading.Thread(target=check_followed_artists_releases, daemon=True)
+    check_thread.start()
+
+@bot.message_handler(commands=['status'])
+def bot_status(message):
+    logger.info(f"Получена команда /status от пользователя {message.from_user.id}")
+    uptime = time.time() - start_time
+    hours, remainder = divmod(int(uptime), 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    status_message = f"✅ Бот работает\n⏱ Время работы: {hours}ч {minutes}м {seconds}с"
+    bot.reply_to(message, status_message)
+
+@bot.message_handler(func=lambda message: True)
+def echo_all(message):
+    logger.info(f"Получено сообщение от пользователя {message.from_user.id}: {message.text}")
+    bot.reply_to(message, "Я понимаю только команды. Используйте /help для получения списка команд.")
+
+# Отслеживаем время запуска бота
+start_time = time.time()
+
 if __name__ == '__main__':
     logger.info("Запуск бота...")
     
