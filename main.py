@@ -221,43 +221,112 @@ def check_and_post_from_queue():
         logger.info(f"Публикация из очереди: {item}")
         
         try:
-            # Пытаемся опубликовать в канал
+            # Пытаемся опубликовать в канал в соответствии с требуемым форматом
             if isinstance(item, dict):
-                if item.get("type") == "release" and "artist" in item and "album" in item:
-                    # Форматирование для альбома
-                    message = (
-                        f"💿 <b>НОВЫЙ АЛЬБОМ</b>\n\n"
-                        f"👤 <b>{item['artist']}</b>\n"
-                        f"🎵 <b>{item['album']}</b>\n\n"
-                        f"🔗 {item['url']}"
-                    )
-                elif item.get("type") == "release" and "album_id" in item:
-                    # Если нет полной информации об альбоме
-                    message = (
-                        f"💿 <b>НОВЫЙ РЕЛИЗ</b>\n\n"
-                        f"🔗 {item['url']}"
-                    )
+                if item.get("type") == "release":
+                    # Извлекаем доступную информацию
+                    artist = item.get("artist", "")
+                    album = item.get("album", "")
+                    release_date = item.get("release_date", "")
+                    album_type = "Альбом" # По умолчанию
+                    track_count = ""
+                    genres = []
+                    
+                    # Если есть доступ к Spotify API и есть album_id, получаем дополнительную информацию
+                    if sp and "album_id" in item:
+                        try:
+                            album_info = sp.album(item["album_id"])
+                            if not artist and "artists" in album_info and album_info["artists"]:
+                                artist = album_info["artists"][0]["name"]
+                            if not album and "name" in album_info:
+                                album = album_info["name"]
+                            if not release_date and "release_date" in album_info:
+                                release_date = album_info["release_date"]
+                            if "album_type" in album_info:
+                                album_type = "Сингл" if album_info["album_type"] == "single" else "Альбом"
+                            if "total_tracks" in album_info:
+                                track_count = f", {album_info['total_tracks']} треков"
+                            
+                            # Получаем жанры артиста
+                            if "artists" in album_info and album_info["artists"]:
+                                artist_id = album_info["artists"][0]["id"]
+                                artist_info = sp.artist(artist_id)
+                                if "genres" in artist_info and artist_info["genres"]:
+                                    genres = ["#" + genre.replace(" ", "_") for genre in artist_info["genres"][:3]]
+                        except Exception as e:
+                            logger.error(f"Ошибка при получении дополнительной информации из Spotify: {e}")
+                    
+                    # Форматирование в соответствии с требованиями
+                    message = f"<b>{artist}</b>\n<b>{album}</b>\n"
+                    
+                    # Добавляем дату, тип и количество треков если есть
+                    details = []
+                    if release_date:
+                        details.append(release_date)
+                    if album_type:
+                        details.append(album_type)
+                    if track_count:
+                        details.append(track_count)
+                    
+                    if details:
+                        message += f"{', '.join(details)}\n"
+                    
+                    # Добавляем жанры, если есть
+                    if genres:
+                        message += f"Жанры: {' '.join(genres)}\n"
+                    
+                    # Добавляем ссылку
+                    message += f"\n{item['url']}"
+                    
                 elif item.get("type") == "track" and "artist" in item and "track" in item:
-                    # Форматирование для трека
-                    message = (
-                        f"🎧 <b>НОВЫЙ ТРЕК</b>\n\n"
-                        f"👤 <b>{item['artist']}</b>\n"
-                        f"🎵 <b>{item['track']}</b>\n\n"
-                        f"🔗 {item['url']}"
-                    )
+                    # Формат для трека - используем тот же формат, что и для релиза
+                    artist = item.get("artist", "")
+                    track = item.get("track", "")
+                    album = item.get("album", "")
+                    
+                    message = f"<b>{artist}</b>\n<b>{track}</b>\n"
+                    if album:
+                        message += f"Из альбома: {album}\n"
+                    
+                    # Пытаемся получить жанры, если доступен Spotify API
+                    genres = []
+                    if sp and "artist_id" in item:
+                        try:
+                            artist_info = sp.artist(item["artist_id"])
+                            if "genres" in artist_info and artist_info["genres"]:
+                                genres = ["#" + genre.replace(" ", "_") for genre in artist_info["genres"][:3]]
+                        except Exception as e:
+                            logger.error(f"Ошибка при получении жанров артиста из Spotify: {e}")
+                    
+                    if genres:
+                        message += f"Жанры: {' '.join(genres)}\n"
+                    
+                    message += f"\n{item['url']}"
+                    
                 elif item.get("type") == "artist" and "artist" in item:
-                    # Форматирование для артиста
-                    message = (
-                        f"👤 <b>АРТИСТ</b>\n\n"
-                        f"<b>{item['artist']}</b>\n\n"
-                        f"🔗 {item['url']}"
-                    )
+                    # Формат для артиста
+                    artist = item.get("artist", "")
+                    
+                    message = f"<b>{artist}</b>\n\n"
+                    
+                    # Пытаемся получить жанры, если доступен Spotify API
+                    genres = []
+                    if sp and "artist_id" in item:
+                        try:
+                            artist_info = sp.artist(item["artist_id"])
+                            if "genres" in artist_info and artist_info["genres"]:
+                                genres = ["#" + genre.replace(" ", "_") for genre in artist_info["genres"][:3]]
+                        except Exception as e:
+                            logger.error(f"Ошибка при получении жанров артиста из Spotify: {e}")
+                    
+                    if genres:
+                        message += f"Жанры: {' '.join(genres)}\n\n"
+                    
+                    message += f"{item['url']}"
+                    
                 else:
                     # Для неизвестного типа или неполных данных
-                    message = (
-                        f"🎵 <b>НОВЫЙ КОНТЕНТ</b>\n\n"
-                        f"🔗 {item.get('url', 'Ссылка отсутствует')}"
-                    )
+                    message = f"Новый контент на Spotify\n\n{item.get('url', 'Ссылка отсутствует')}"
             else:
                 # Если элемент очереди не словарь
                 message = str(item)
@@ -270,6 +339,7 @@ def check_and_post_from_queue():
             remove_from_queue(0)
         except Exception as e:
             logger.error(f"Ошибка при публикации: {e}")
+            logger.error(traceback.format_exc())
     except Exception as e:
         logger.error(f"Ошибка при обработке очереди: {e}")
         logger.error(traceback.format_exc())
