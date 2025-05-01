@@ -483,17 +483,12 @@ if __name__ == '__main__':
     # Запускаем бота с использованием polling
     logger.info("Бот запущен и готов к работе")
     
-    # Используем бесконечный цикл с одним экземпляром polling
+    # Используем более простой подход к запуску polling
     try:
-        # Сбрасываем все предыдущие обновления, чтобы избежать конфликтов
-        updates = bot.get_updates(offset=-1, limit=1, timeout=1)
-        if updates:
-            last_update_id = updates[-1].update_id
-            bot.get_updates(offset=last_update_id+1, timeout=1)
-            logger.info(f"Сброшены предыдущие обновления, последний ID: {last_update_id}")
-        
         logger.info("Запуск единственного экземпляра polling")
-        bot.infinity_polling(timeout=60, long_polling_timeout=30)
+        # Не используем предварительную очистку обновлений, которая может вызывать конфликты
+        # Просто запускаем infinity_polling
+        bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
     except Exception as e:
         logger.error(f"Критическая ошибка в polling: {e}")
         logger.error(traceback.format_exc())
