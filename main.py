@@ -1,4 +1,144 @@
-import os
+# Команда для расширенного управления очередью
+@bot.message_handler(commands=['manage'])
+def extended_queue_manage(message):
+    if message.from_user.id != admin_id:
+        bot.send_message(message.chat.id, f"У вас нет доступа к этой команде. Ваш ID: {message.from_user.id}, а нужен: {admin_id}")
+        return
+    
+    queue_items = get_queue()
+    if not queue_items:
+        bot.send_message(admin_id, "Очередь пуста")
+        return
+        
+    # Создаем клавиатуру с опциями управления
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    
+    # Добавляем кнопки для каждого релиза в очереди
+    for item in queue_items[:10]:  # Ограничиваем до 10 элементов
+        queue_id, _, artist, title, _, _, _, post_time = item
+        post_datetime = datetime.fromisoformat(post_time)
+        formatted_time = post_datetime.strftime('%H:%M, %d.%m')
+        
+        # Создаем кнопку с информацией о релизе
+        button_text = f"🎵 {artist} - {title} ({formatted_time})"
+        
+        # Добавляем кнопки управления для этого релиза
+        markup.add(
+            types.InlineKeyboardButton(button_text, callback_data=f"info_{queue_id}")
+        )
+        markup.add(
+            types.InlineKeyboardButton("⬆️ Вверх", callback_data=f"up_{queue_id}"),
+            types.InlineKeyboardButton("⬇️ Вниз", callback_data=f"down_{queue_id}")
+        )
+        markup.add(
+            types.InlineKeyboardButton("⏱ Изменить время", callback_data=f"time_{queue_id}"),
+            types.InlineKeyboardButton("❌ Удалить", callback_data=f"del_{queue_id}")
+        )
+    
+    # Добавляем кнопку для очистки всей очереди внизу
+    markup.add(types.InlineKeyboardButton("🗑 Очистить всю очередь", callback_data="clear_all"))
+    
+    bot.send_message(admin_id, "📋 <b>Управление очередью постов:</b>", reply_markup=markup, parse_mode='HTML')# Обработка ссылок на Spotify
+@bot.message_handler(func=lambda message: 
+                    message.text and ('open.spotify.com/album/' in message.text or 'open.spotify.com/track/' in message.text))
+def spotify_link_handler(message):
+    if message.from_user.id != admin_id:
+        bot.send_message(message.chat.id, "Только администратор может добавлять релизы в очередь.")
+        return
+    
+    # Находим ссылку в сообщении
+    words = message.text.split()
+    spotify_link = None
+    for word in words:
+        if 'open.spotify.com/album/' in word or 'open.spotify.com/track/' in word:
+            spotify_link = word
+            break
+    
+    if not spotify_link:
+        bot.send_message(message.chat.id, "Не удалось обнаружить корректную ссылку на Spotify.")
+        return
+    
+    # Отправляем сообщение о начале обработки
+    processing_msg = bot.send_message(message.chat.id, "Обрабатываю ссылку на Spotify...")
+    
+    # Добавляем релиз в очередь
+    success, result = add_release_by_link(spotify_link)
+    
+    # Обновляем сообщение с результатом
+    bot.edit_message_text(result, chat_id=message.chat.id, message_id=processing_msg.message_id)
+    
+    # Если релиз успешно добавлен, показываем обновленную очередь
+    if success:
+        queue_items = get_queue()
+        notify_admin_about_queue(queue_items)# Функция добавления релиза в очередь по ссылке
+def add_release_by_link(spotify_link, scheduled_time=None):
+    try:
+        # Из ссылки выделяем ID альбома/трека
+        if 'spotify.com/album/' in spotify_link:
+            # Формат: https://open.spotify.com/album/1234567890
+            album_id = spotify_link.split('spotify.com/album/')[1].split('?')[0]
+        elif 'spotify.com/track/' in spotify_link:
+            # Если это ссылка на трек, получаем его альбом
+            track_id = spotify_link.split('spotify.com/track/')[1].split('?')[0]
+            track = sp.track(track_id)
+            album_id = track['album']['id']
+        else:
+            return False, "Неподдерживаемый формат ссылки. Поддерживаются ссылки на альбомы и треки."
+        
+        # Проверяем, не добавлен ли уже этот релиз в очередь
+        current_queue = get_queue()
+        queue_spotify_ids = [item[1] for item in current_queue]
+        
+        if album_id in queue_spotify_ids:
+            return False, "Этот релиз уже находится в очереди."
+        
+        # Проверяем, не был ли уже опубликован этот релиз
+        if is_release_posted(album_id):
+            return False, "Этот релиз уже был опубликован ранее."
+        
+        # Получаем информацию об альбоме
+        album = sp.album(album_id)
+        
+        # Получаем основную информацию для очереди
+        artist_name = album['artists'][0]['name']
+        album_title = album['name']
+        image_url = album['images'][0]['url'] if album['images'] else None
+        spotify_link = album['external_urls']['spotify']
+        
+        # Получаем первый трек альбома для запроса
+        album_tracks = sp.album_tracks(album_id, limit=1)
+        if album_tracks['items']:
+            track = album_tracks['items'][0]
+            query = f"{track['name']} - {artist_name}"
+        else:
+            query = f"{album_title} - {artist_name}"
+        
+        # Определяем время публикации
+        moscow_tz = pytz.timezone('Europe/Moscow')
+        if scheduled_time:
+            post_time = scheduled_time
+        else:
+            # Если время не указано, ставим на ближайший час
+            post_time = datetime.now(moscow_tz) + timedelta(hours=1)
+            post_time = post_time.replace(minute=0, second=0, microsecond=0)
+        
+        # Добавляем в очередь
+        add_to_queue(
+            album_id,
+            artist_name,
+            album_title,
+            image_url,
+            spotify_link,
+            query,
+            post_time.isoformat()
+        )
+        
+        return True, f"Релиз {artist_name} - {album_title} добавлен в очередь на {post_time.strftime('%H:%M, %d.%m')}"
+        
+    except Exception as e:
+        logger.error(f"Ошибка при добавлении релиза по ссылке: {e}")
+        logger.error(traceback.format_exc())
+        return False, f"Ошибка при добавлении релиза: {str(e)}"import os
 import telebot
 from telebot import types
 import requests
@@ -158,8 +298,8 @@ def check_followed_artists_releases():
         moscow_tz = pytz.timezone('Europe/Moscow')
         current_time = datetime.now(moscow_tz)
         
-        # Точно 3 дня назад
-        days_ago = 3
+        # Точно 7 дней назад - увеличиваем окно поиска, чтобы гарантированно не пропускать релизы
+        days_ago = 7
         cutoff_date = current_time - timedelta(days=days_ago)
         cutoff_date_str = cutoff_date.strftime('%Y-%m-%d')
         
@@ -167,6 +307,10 @@ def check_followed_artists_releases():
         logger.info(f"Текущий год: {current_time.year}")
         
         new_releases = []
+        
+        # Получаем текущую очередь - для проверки дубликатов
+        current_queue = get_queue()
+        queue_spotify_ids = [item[1] for item in current_queue]  # ID релизов в очереди
         
         # Получаем список исполнителей, на которых подписан пользователь
         try:
@@ -188,9 +332,9 @@ def check_followed_artists_releases():
             artist_count = 0
             for artist in followed_artists:
                 artist_count += 1
-                # Обрабатываем только первые 100 исполнителей для экономии времени и ресурсов
-                if artist_count > 100:
-                    logger.info(f"Достигнут лимит в 100 исполнителей, пропускаем остальных")
+                # Обрабатываем только первые 200 исполнителей для экономии времени и ресурсов
+                if artist_count > 200:
+                    logger.info(f"Достигнут лимит в 200 исполнителей, пропускаем остальных")
                     break
                     
                 artist_id = artist['id']
@@ -202,34 +346,44 @@ def check_followed_artists_releases():
                     
                     for album in albums['items']:
                         release_date_str = album.get('release_date', '')
+                        album_id = album.get('id', '')
+                        
+                        # Пропускаем если ID альбома отсутствует
+                        if not album_id:
+                            continue
+                            
+                        # Пропускаем, если релиз уже в очереди
+                        if album_id in queue_spotify_ids:
+                            logger.debug(f"Релиз {artist_name} - {album['name']} уже в очереди, пропускаем")
+                            continue
+                        
+                        # Пропускаем, если релиз уже был опубликован
+                        if is_release_posted(album_id):
+                            logger.debug(f"Релиз {artist_name} - {album['name']} уже был опубликован, пропускаем")
+                            continue
                         
                         if not release_date_str:
                             continue
                         
                         try:
-                            # Парсим дату релиза и проверяем, что она действительно в этом году
+                            # Парсим дату релиза
                             if len(release_date_str) == 4:  # Только год (YYYY)
                                 year = int(release_date_str)
-                                if year != current_time.year:
-                                    logger.debug(f"Пропускаем релиз с другим годом: {album['name']} ({release_date_str})")
+                                if year < current_time.year - 1:  # Пропускаем релизы старше прошлого года
+                                    logger.debug(f"Пропускаем старый релиз с другим годом: {album['name']} ({release_date_str})")
                                     continue
                                 # Для релизов с указанием только года используем 1 января
                                 release_date = datetime(year, 1, 1)
                             elif len(release_date_str) == 7:  # Год и месяц (YYYY-MM)
                                 year, month = map(int, release_date_str.split('-'))
-                                if year != current_time.year:
-                                    logger.debug(f"Пропускаем релиз с другим годом: {album['name']} ({release_date_str})")
+                                if year < current_time.year - 1:  # Пропускаем релизы старше прошлого года
+                                    logger.debug(f"Пропускаем старый релиз с другим годом: {album['name']} ({release_date_str})")
                                     continue
-                                
-                                # Если текущий месяц или предыдущий (если мы в начале месяца)
-                                if month != current_time.month and not (current_time.day <= 3 and month == current_time.month - 1):
-                                    logger.debug(f"Пропускаем релиз не текущего месяца: {album['name']} ({release_date_str})")
-                                    continue
-                                
-                                # Для релизов текущего месяца берем 1 число
+                                # Для релизов с годом и месяцем используем первый день месяца
                                 release_date = datetime(year, month, 1)
                             elif len(release_date_str) == 10:  # Полная дата (YYYY-MM-DD)
                                 release_date = datetime.strptime(release_date_str, '%Y-%m-%d')
+                                # Для полных дат не делаем предварительную фильтрацию по году
                             else:
                                 logger.warning(f"Неизвестный формат даты: {release_date_str}, пропускаем")
                                 continue
@@ -244,38 +398,32 @@ def check_followed_artists_releases():
                             # Дебаг информация о разнице
                             logger.debug(f"Альбом {album['name']} от {artist_name} - дата: {release_date_str}, разница: {days_difference} дней")
                             
-                            # Проверяем, что релиз вышел не более 3 дней назад
+                            # Добавляем релизы за указанный период
                             if 0 <= days_difference <= days_ago:
                                 logger.info(f"Найден релиз в диапазоне дат: {album['name']} от {artist_name}, {days_difference} дней назад")
                                 
-                                spotify_id = album['id']
-                                
-                                # Проверяем, не был ли уже запощен этот релиз
-                                if not is_release_posted(spotify_id):
-                                    # Получаем треки из альбома для примера
-                                    try:
-                                        album_tracks = sp.album_tracks(spotify_id, limit=1)
+                                # Получаем треки из альбома для примера
+                                try:
+                                    album_tracks = sp.album_tracks(album_id, limit=1)
+                                    
+                                    if album_tracks['items']:
+                                        track = album_tracks['items'][0]
                                         
-                                        if album_tracks['items']:
-                                            track = album_tracks['items'][0]
-                                            
-                                            release_info = {
-                                                'artist': artist_name,
-                                                'title': album['name'],
-                                                'track_name': track['name'],
-                                                'image_url': album['images'][0]['url'] if album['images'] else None,
-                                                'spotify_link': album['external_urls']['spotify'],
-                                                'spotify_id': spotify_id,
-                                                'release_date': release_date,
-                                                'days_old': days_difference,
-                                                'query': f"{track['name']} - {artist_name}"
-                                            }
-                                            new_releases.append(release_info)
-                                            logger.info(f"Найден новый релиз: {release_info['artist']} - {release_info['title']}, дата: {release_date_str}")
-                                    except Exception as e:
-                                        logger.error(f"Ошибка при получении треков для альбома {spotify_id}: {e}")
-                                else:
-                                    logger.debug(f"Релиз уже отправлялся: {artist_name} - {album['name']}")
+                                        release_info = {
+                                            'artist': artist_name,
+                                            'title': album['name'],
+                                            'track_name': track['name'],
+                                            'image_url': album['images'][0]['url'] if album['images'] else None,
+                                            'spotify_link': album['external_urls']['spotify'],
+                                            'spotify_id': album_id,
+                                            'release_date': release_date,
+                                            'days_old': days_difference,
+                                            'query': f"{track['name']} - {artist_name}"
+                                        }
+                                        new_releases.append(release_info)
+                                        logger.info(f"Найден новый релиз: {release_info['artist']} - {release_info['title']}, дата: {release_date_str}")
+                                except Exception as e:
+                                    logger.error(f"Ошибка при получении треков для альбома {album_id}: {e}")
                             else:
                                 if days_difference < 0:
                                     logger.debug(f"Пропускаем будущий релиз {artist_name} - {album['name']}: {release_date_str}")
@@ -305,17 +453,21 @@ def check_followed_artists_releases():
             queue_start_time = datetime.now(moscow_tz) + timedelta(minutes=5)
             
             for idx, release in enumerate(sorted_releases):
+                # В качестве времени поста берем текущее время + индекс (часы)
                 post_time = queue_start_time + timedelta(hours=idx)
-                add_to_queue(
-                    release['spotify_id'],
-                    release['artist'],
-                    release['title'],
-                    release['image_url'],
-                    release['spotify_link'],
-                    release['query'],
-                    post_time.isoformat()
-                )
-                logger.info(f"Добавлен в очередь: {release['artist']} - {release['title']}, запланировано на: {post_time.strftime('%H:%M, %d.%m')}")
+                
+                # Добавляем в очередь только если ID ещё не в очереди и не опубликован
+                if not is_release_posted(release['spotify_id']) and release['spotify_id'] not in queue_spotify_ids:
+                    add_to_queue(
+                        release['spotify_id'],
+                        release['artist'],
+                        release['title'],
+                        release['image_url'],
+                        release['spotify_link'],
+                        release['query'],
+                        post_time.isoformat()
+                    )
+                    logger.info(f"Добавлен в очередь: {release['artist']} - {release['title']}, запланировано на: {post_time.strftime('%H:%M, %d.%m')}")
             
             # Отправляем уведомление админу
             queue_info = get_queue()
@@ -370,13 +522,13 @@ def post_to_channel(release_from_queue):
             track_count = 0
             genre_text = ""
         
-        # Формируем текст сообщения по заданному формату
-        message_text = f"{artist}\n"  # Артист
-        message_text += f"{title}\n"  # Релиз
+        # Формируем текст сообщения согласно формату
+        message_text = f"<b>{artist}</b>\n"  # Артист (жирным)
+        message_text += f"<b>{title}</b>\n"  # Название релиза (жирным)
         message_text += f"{release_date}, {release_type}, {track_count} tracks\n"  # Информация о релизе
         
         if genre_text:
-            message_text += f"{genre_text}\n"  # Жанры с хэштегами
+            message_text += f"{genre_text}"  # Жанры с хэштегами
         
         # Создаем кнопку для Spotify
         keyboard = types.InlineKeyboardMarkup()
@@ -391,15 +543,15 @@ def post_to_channel(release_from_queue):
             try:
                 response = requests.get(image_url, timeout=10)
                 if response.status_code == 200:
-                    bot.send_photo(channel_id, photo=response.content, caption=message_text, reply_markup=keyboard)
+                    bot.send_photo(channel_id, photo=response.content, caption=message_text, reply_markup=keyboard, parse_mode='HTML')
                 else:
                     # Если не удалось загрузить обложку
-                    bot.send_message(channel_id, message_text, reply_markup=keyboard)
+                    bot.send_message(channel_id, message_text, reply_markup=keyboard, parse_mode='HTML')
             except Exception as img_error:
                 logger.warning(f"Ошибка при загрузке обложки: {img_error}")
-                bot.send_message(channel_id, message_text, reply_markup=keyboard)
+                bot.send_message(channel_id, message_text, reply_markup=keyboard, parse_mode='HTML')
         else:
-            bot.send_message(channel_id, message_text, reply_markup=keyboard)
+            bot.send_message(channel_id, message_text, reply_markup=keyboard, parse_mode='HTML')
         
         # Отмечаем как запощенный и удаляем из очереди
         mark_release_posted(spotify_id)
@@ -476,12 +628,14 @@ def manage_queue(message):
     
     bot.send_message(admin_id, "Выберите пост для удаления:", reply_markup=markup)
 
-# Обработка нажатий на кнопки
+# Расширенный обработчик callback-запросов
 @bot.callback_query_handler(func=lambda call: True)
-def callback_query(call):
+def extended_callback_query(call):
     if call.from_user.id != admin_id:
+        bot.answer_callback_query(call.id, "У вас нет прав для этого действия")
         return
     
+    # Обработка для удаления элемента
     if call.data.startswith("del_"):
         queue_id = int(call.data.replace("del_", ""))
         remove_from_queue(queue_id)
@@ -489,12 +643,238 @@ def callback_query(call):
         
         # Обновляем сообщение
         queue_items = get_queue()
-        notify_admin_about_queue(queue_items)
-        
+        if queue_items:
+            # Обновляем интерфейс управления очередью
+            try:
+                bot.edit_message_text("Пост удален. Используйте /manage для обновления интерфейса управления.", 
+                                     chat_id=call.message.chat.id, 
+                                     message_id=call.message.message_id)
+            except:
+                pass
+            notify_admin_about_queue(queue_items)
+        else:
+            bot.edit_message_text("Очередь пуста", 
+                                 chat_id=call.message.chat.id, 
+                                 message_id=call.message.message_id)
+    
+    # Обработка для очистки всей очереди
     elif call.data == "clear_all":
         clear_queue()
         bot.answer_callback_query(call.id, "Очередь очищена")
-        bot.send_message(admin_id, "Очередь полностью очищена")
+        bot.edit_message_text("Очередь полностью очищена", 
+                             chat_id=call.message.chat.id, 
+                             message_id=call.message.message_id)
+    
+    # Обработка перемещения элемента вверх
+    elif call.data.startswith("up_"):
+        queue_id = int(call.data.replace("up_", ""))
+        
+        # Получаем текущую очередь
+        queue_items = get_queue()
+        
+        # Ищем позицию элемента в очереди
+        item_position = None
+        for i, item in enumerate(queue_items):
+            if item[0] == queue_id:
+                item_position = i
+                break
+        
+        # Проверяем, что элемент найден и не является первым
+        if item_position is not None and item_position > 0:
+            # Получаем элемент и элемент перед ним
+            current_item = queue_items[item_position]
+            prev_item = queue_items[item_position - 1]
+            
+            # Меняем местами времена публикации
+            conn = sqlite3.connect('bot_data.db', check_same_thread=False)
+            c = conn.cursor()
+            c.execute("UPDATE queue SET post_time = ? WHERE id = ?", (prev_item[7], current_item[0]))
+            c.execute("UPDATE queue SET post_time = ? WHERE id = ?", (current_item[7], prev_item[0]))
+            conn.commit()
+            conn.close()
+            
+            bot.answer_callback_query(call.id, "Релиз перемещен вверх в очереди")
+        else:
+            bot.answer_callback_query(call.id, "Невозможно переместить: элемент уже первый в очереди или не найден")
+        
+        # Обновляем интерфейс
+        bot.edit_message_text("Очередь обновлена. Используйте /manage для обновления интерфейса управления.", 
+                             chat_id=call.message.chat.id, 
+                             message_id=call.message.message_id)
+    
+    # Обработка перемещения элемента вниз
+    elif call.data.startswith("down_"):
+        queue_id = int(call.data.replace("down_", ""))
+        
+        # Получаем текущую очередь
+        queue_items = get_queue()
+        
+        # Ищем позицию элемента в очереди
+        item_position = None
+        for i, item in enumerate(queue_items):
+            if item[0] == queue_id:
+                item_position = i
+                break
+        
+        # Проверяем, что элемент найден и не является последним
+        if item_position is not None and item_position < len(queue_items) - 1:
+            # Получаем элемент и элемент после него
+            current_item = queue_items[item_position]
+            next_item = queue_items[item_position + 1]
+            
+            # Меняем местами времена публикации
+            conn = sqlite3.connect('bot_data.db', check_same_thread=False)
+            c = conn.cursor()
+            c.execute("UPDATE queue SET post_time = ? WHERE id = ?", (next_item[7], current_item[0]))
+            c.execute("UPDATE queue SET post_time = ? WHERE id = ?", (current_item[7], next_item[0]))
+            conn.commit()
+            conn.close()
+            
+            bot.answer_callback_query(call.id, "Релиз перемещен вниз в очереди")
+        else:
+            bot.answer_callback_query(call.id, "Невозможно переместить: элемент уже последний в очереди или не найден")
+        
+        # Обновляем интерфейс
+        bot.edit_message_text("Очередь обновлена. Используйте /manage для обновления интерфейса управления.", 
+                             chat_id=call.message.chat.id, 
+                             message_id=call.message.message_id)
+    
+    # Обработка информации о релизе
+    elif call.data.startswith("info_"):
+        queue_id = int(call.data.replace("info_", ""))
+        
+        # Получаем информацию о релизе
+        conn = sqlite3.connect('bot_data.db', check_same_thread=False)
+        c = conn.cursor()
+        c.execute("SELECT * FROM queue WHERE id = ?", (queue_id,))
+        item = c.fetchone()
+        conn.close()
+        
+        if item:
+            _, spotify_id, artist, title, image_url, spotify_link, _, post_time = item
+            post_datetime = datetime.fromisoformat(post_time)
+            formatted_time = post_datetime.strftime('%H:%M, %d.%m')
+            
+            # Формируем детальное сообщение о релизе
+            info_text = f"📊 <b>Информация о релизе в очереди:</b>\n\n"
+            info_text += f"<b>ID:</b> {queue_id}\n"
+            info_text += f"<b>Артист:</b> {artist}\n"
+            info_text += f"<b>Название:</b> {title}\n"
+            info_text += f"<b>Запланировано на:</b> {formatted_time}\n"
+            info_text += f"<b>Spotify ID:</b> {spotify_id}\n"
+            
+            # Создаем клавиатуру с кнопкой назад
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("🔙 Назад к управлению", callback_data="back_to_manage"))
+            markup.add(types.InlineKeyboardButton("🔄 Опубликовать сейчас", callback_data=f"publish_now_{queue_id}"))
+            
+            bot.edit_message_text(info_text, 
+                                 chat_id=call.message.chat.id, 
+                                 message_id=call.message.message_id,
+                                 reply_markup=markup,
+                                 parse_mode='HTML')
+        else:
+            bot.answer_callback_query(call.id, "Релиз не найден в очереди")
+    
+    # Возврат к интерфейсу управления
+    elif call.data == "back_to_manage":
+        # Отправляем новое сообщение с меню управления
+        extended_queue_manage(call.message)
+        
+        # Удаляем старое сообщение
+        try:
+            bot.delete_message(chat_id=call.message.chat.id, message_id=call.message.message_id)
+        except:
+            pass
+    
+    # Публикация релиза немедленно
+    elif call.data.startswith("publish_now_"):
+        queue_id = int(call.data.replace("publish_now_", ""))
+        
+        # Получаем данные релиза
+        conn = sqlite3.connect('bot_data.db', check_same_thread=False)
+        c = conn.cursor()
+        c.execute("SELECT * FROM queue WHERE id = ?", (queue_id,))
+        item = c.fetchone()
+        conn.close()
+        
+        if item:
+            bot.answer_callback_query(call.id, "Релиз будет опубликован немедленно")
+            bot.edit_message_text("Публикация релиза...", 
+                                 chat_id=call.message.chat.id, 
+                                 message_id=call.message.message_id)
+            
+            # Публикуем релиз
+            try:
+                post_to_channel(item)
+                bot.edit_message_text("Релиз успешно опубликован!", 
+                                     chat_id=call.message.chat.id, 
+                                     message_id=call.message.message_id)
+            except Exception as e:
+                bot.edit_message_text(f"Ошибка при публикации релиза: {str(e)}", 
+                                     chat_id=call.message.chat.id, 
+                                     message_id=call.message.message_id)
+        else:
+            bot.answer_callback_query(call.id, "Релиз не найден в очереди")
+    
+    # Обработка изменения времени публикации
+    elif call.data.startswith("time_"):
+        queue_id = int(call.data.replace("time_", ""))
+        
+        # Получаем данные релиза
+        conn = sqlite3.connect('bot_data.db', check_same_thread=False)
+        c = conn.cursor()
+        c.execute("SELECT * FROM queue WHERE id = ?", (queue_id,))
+        item = c.fetchone()
+        conn.close()
+        
+        if item:
+            # Создаем сообщение с инструкцией
+            bot.edit_message_text("Введите новую дату и время публикации в формате: ДД.ММ.ГГГГ ЧЧ:ММ\n"
+                                 "Например: 01.05.2025 14:30", 
+                                 chat_id=call.message.chat.id, 
+                                 message_id=call.message.message_id)
+            
+            # Сохраняем ID релиза для следующего шага
+            bot.register_next_step_handler(call.message, process_new_time, queue_id)
+        else:
+            bot.answer_callback_query(call.id, "Релиз не найден в очереди")
+
+# Обработчик для ввода нового времени публикации
+def process_new_time(message, queue_id):
+    try:
+        # Парсим введенное время
+        new_time = datetime.strptime(message.text, '%d.%m.%Y %H:%M')
+        
+        # Локализуем время
+        moscow_tz = pytz.timezone('Europe/Moscow')
+        new_time = moscow_tz.localize(new_time)
+        
+        # Обновляем время публикации в БД
+        conn = sqlite3.connect('bot_data.db', check_same_thread=False)
+        c = conn.cursor()
+        c.execute("UPDATE queue SET post_time = ? WHERE id = ?", (new_time.isoformat(), queue_id))
+        conn.commit()
+        
+        # Получаем информацию о релизе для ответа
+        c.execute("SELECT artist, title FROM queue WHERE id = ?", (queue_id,))
+        result = c.fetchone()
+        conn.close()
+        
+        if result:
+            artist, title = result
+            bot.send_message(message.chat.id, f"Время публикации релиза '{artist} - {title}' изменено на {new_time.strftime('%d.%m.%Y %H:%M')}")
+        else:
+            bot.send_message(message.chat.id, "Время публикации обновлено.")
+        
+        # Показываем обновленную очередь
+        queue_items = get_queue()
+        notify_admin_about_queue(queue_items)
+    
+    except ValueError:
+        bot.send_message(message.chat.id, "Неверный формат даты/времени. Используйте формат: ДД.ММ.ГГГГ ЧЧ:ММ")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"Ошибка при изменении времени: {str(e)}")
 
 # Команда проверки новых релизов
 @bot.message_handler(commands=['check'])
