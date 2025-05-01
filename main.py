@@ -1,11 +1,30 @@
-import logging
-import time
-import threading
-import traceback
-import os
-import spotipy
-import telebot
-from spotipy.oauth2 import SpotifyOAuth
+# В начало файла добавляем блокировку файла
+import fcntl
+import sys
+
+# Функция для проверки, что запущен только один экземпляр
+def ensure_single_instance():
+    """Гарантирует, что запущен только один экземпляр скрипта"""
+    global lock_file
+    lock_file_path = "/tmp/spotify_telegram_bot.lock"
+    
+    try:
+        # Открываем файл блокировки
+        lock_file = open(lock_file_path, "w")
+        
+        # Пытаемся получить эксклюзивную блокировку
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        logger.info("Успешно получена блокировка файла, запускаем единственный экземпляр бота")
+        
+        # Записываем PID в файл блокировки
+        lock_file.write(str(os.getpid()))
+        lock_file.flush()
+        
+        return True
+    except IOError:
+        # Не удалось получить блокировку, значит другой экземпляр уже запущен
+        logger.error("Другой экземпляр бота уже запущен. Завершаем работу.")
+        return False
 
 # Настройка логгера
 logging.basicConfig(
@@ -224,6 +243,11 @@ start_time = time.time()
 if __name__ == '__main__':
     logger.info("Запуск бота...")
     
+    # Проверяем, что запущен только один экземпляр
+    if not ensure_single_instance():
+        logger.error("Завершение работы из-за обнаружения другого запущенного экземпляра")
+        sys.exit(1)
+    
     # Очищаем webhook если он был установлен
     try:
         bot.remove_webhook()
@@ -291,10 +315,16 @@ if __name__ == '__main__':
     logger.info("Бот запущен и готов к работе")
     
     # Используем бесконечный цикл с одним экземпляром polling
-    # Вместо множественных вызовов bot.polling
     try:
+        # Сбрасываем все предыдущие обновления, чтобы избежать конфликтов
+        updates = bot.get_updates(offset=-1, limit=1, timeout=1)
+        if updates:
+            last_update_id = updates[-1].update_id
+            bot.get_updates(offset=last_update_id+1, timeout=1)
+            logger.info(f"Сброшены предыдущие обновления, последний ID: {last_update_id}")
+        
         logger.info("Запуск единственного экземпляра polling")
-        bot.polling(none_stop=True, interval=1, timeout=60)
+        bot.infinity_polling(timeout=60, long_polling_timeout=30)
     except Exception as e:
         logger.error(f"Критическая ошибка в polling: {e}")
         logger.error(traceback.format_exc())
