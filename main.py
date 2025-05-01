@@ -16,30 +16,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Функция для проверки, что запущен только один экземпляр
-def ensure_single_instance():
-    """Гарантирует, что запущен только один экземпляр скрипта"""
-    global lock_file
-    lock_file_path = "/tmp/spotify_telegram_bot.lock"
-    
-    try:
-        # Открываем файл блокировки
-        lock_file = open(lock_file_path, "w")
-        
-        # Пытаемся получить эксклюзивную блокировку
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        logger.info("Успешно получена блокировка файла, запускаем единственный экземпляр бота")
-        
-        # Записываем PID в файл блокировки
-        lock_file.write(str(os.getpid()))
-        lock_file.flush()
-        
-        return True
-    except IOError:
-        # Не удалось получить блокировку, значит другой экземпляр уже запущен
-        logger.error("Другой экземпляр бота уже запущен. Завершаем работу.")
-        return False
-
 # Получаем данные из переменных окружения Railway
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')  # Исправлено имя переменной
 SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
@@ -444,29 +420,33 @@ def echo_all(message):
 # Отслеживаем время запуска бота
 start_time = time.time()
 
-if __name__ == '__main__':
-    logger.info("Запуск бота...")
+# Функция для запуска бота с использованием webhook
+def start_bot_with_webhook():
+    WEBHOOK_HOST = os.environ.get('WEBHOOK_HOST', f'https://{os.environ.get("RAILWAY_STATIC_URL", "")}.up.railway.app')
+    WEBHOOK_PATH = f'/webhook/{TELEGRAM_BOT_TOKEN}'
+    WEBHOOK_URL = f'{WEBHOOK_HOST}{WEBHOOK_PATH}'
     
-    # Проверяем, что запущен только один экземпляр
-    if not ensure_single_instance():
-        logger.error("Завершение работы из-за обнаружения другого запущенного экземпляра")
-        sys.exit(1)
+    # Настраиваем webhook
+    bot.remove_webhook()
+    time.sleep(0.5)
+    bot.set_webhook(url=WEBHOOK_URL)
     
-    # Очищаем webhook если он был установлен
-    try:
-        bot.remove_webhook()
-        logger.info("Webhook удален")
-    except Exception as e:
-        logger.error(f"Ошибка при удалении webhook: {e}")
+    # Запускаем Flask-приложение для приема обновлений через webhook
+    from flask import Flask, request, abort
     
-    # Проверяем, что бот единственный экземпляр
-    try:
-        bot.delete_webhook()
-        logger.info("Webhook удален (метод delete_webhook)")
-    except Exception as e:
-        logger.error(f"Ошибка при удалении webhook альтернативным методом: {e}")
+    app = Flask(__name__)
     
-    # Периодические задачи
+    @app.route(WEBHOOK_PATH, methods=['POST'])
+    def webhook():
+        if request.headers.get('content-type') == 'application/json':
+            json_string = request.get_data().decode('utf-8')
+            update = telebot.types.Update.de_json(json_string)
+            bot.process_new_updates([update])
+            return ''
+        else:
+            abort(403)
+    
+    # Запускаем фоновые задачи
     def run_background_tasks():
         last_check_time = time.time()
         last_queue_check = time.time()
@@ -486,7 +466,7 @@ if __name__ == '__main__':
                         logger.error(f"Ошибка при обновлении токена: {e}")
                     last_token_refresh = time.time()
                 
-                # Проверяем новые релизы каждые N часов (из переменной окружения)
+                # Проверяем новые релизы каждые N часов
                 if time.time() - last_check_time > CHECK_INTERVAL_HOURS * 60 * 60:
                     logger.info(f"Проверка новых релизов (интервал: {CHECK_INTERVAL_HOURS} ч)...")
                     check_followed_artists_releases()
@@ -508,22 +488,78 @@ if __name__ == '__main__':
     background_thread = threading.Thread(target=run_background_tasks, daemon=True)
     background_thread.start()
     
-    # Сразу запускаем проверку новых релизов при старте
-    logger.info("Запуск первичной проверки релизов...")
-    
-    # НЕ блокируем основной поток для запуска проверки
+    # Запускаем проверку новых релизов при старте
     check_thread = threading.Thread(target=check_followed_artists_releases, daemon=True)
     check_thread.start()
     
-    # Запускаем бота с использованием polling
-    logger.info("Бот запущен и готов к работе")
-    
-    # Используем более простой подход к запуску polling
+    # Запускаем Flask приложение
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
+
+if __name__ == '__main__':
+    # Используем try-except для красивого завершения при ошибках
     try:
-        logger.info("Запуск единственного экземпляра polling")
-        # Не используем предварительную очистку обновлений, которая может вызывать конфликты
-        # Просто запускаем infinity_polling
-        bot.infinity_polling(timeout=60, long_polling_timeout=30, skip_pending=True)
+        # Запускаем бота через webhook
+        if 'RAILWAY_STATIC_URL' in os.environ:
+            logger.info("Запуск бота с использованием webhook...")
+            start_bot_with_webhook()
+        else:
+            # Если среда не обнаружена, используем обычный polling
+            logger.info("Запуск бота с использованием polling...")
+            
+            # Запускаем фоновые задачи
+            def run_background_tasks():
+                last_check_time = time.time()
+                last_queue_check = time.time()
+                last_token_refresh = time.time()
+                
+                while True:
+                    try:
+                        # Обновляем токен каждый час
+                        if time.time() - last_token_refresh > 60 * 60:
+                            logger.info("Обновляем токен Spotify...")
+                            try:
+                                token_info = sp_oauth.refresh_access_token(spotify_refresh_token)
+                                global sp
+                                sp = spotipy.Spotify(auth=token_info['access_token'])
+                                logger.info("Токен Spotify успешно обновлен")
+                            except Exception as e:
+                                logger.error(f"Ошибка при обновлении токена: {e}")
+                            last_token_refresh = time.time()
+                        
+                        # Проверяем новые релизы каждые N часов
+                        if time.time() - last_check_time > CHECK_INTERVAL_HOURS * 60 * 60:
+                            logger.info(f"Проверка новых релизов (интервал: {CHECK_INTERVAL_HOURS} ч)...")
+                            check_followed_artists_releases()
+                            last_check_time = time.time()
+                        
+                        # Проверяем очередь каждую минуту
+                        if time.time() - last_queue_check > 60:
+                            logger.debug("Проверка очереди...")
+                            check_and_post_from_queue()
+                            last_queue_check = time.time()
+                        
+                        time.sleep(1)
+                    except Exception as e:
+                        logger.error(f"Ошибка в фоновых задачах: {e}")
+                        logger.error(traceback.format_exc())
+                        time.sleep(5)
+            
+            # Запускаем фоновые задачи в отдельном потоке
+            background_thread = threading.Thread(target=run_background_tasks, daemon=True)
+            background_thread.start()
+            
+            # Запускаем проверку новых релизов при старте
+            check_thread = threading.Thread(target=check_followed_artists_releases, daemon=True)
+            check_thread.start()
+            
+            # Запускаем бота один раз без цикла
+            bot.remove_webhook()
+            bot.polling(none_stop=True, timeout=60)
+            
+    except KeyboardInterrupt:
+        logger.info("Завершение работы бота по команде пользователя...")
     except Exception as e:
-        logger.error(f"Критическая ошибка в polling: {e}")
+        logger.error(f"Критическая ошибка: {e}")
         logger.error(traceback.format_exc())
+    finally:
+        logger.info("Бот завершил работу")
