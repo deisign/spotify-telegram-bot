@@ -15,15 +15,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Получаем данные из переменных окружения Railway
-TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')  # Исправлено имя переменной
 SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 SPOTIFY_REDIRECT_URI = os.environ.get('SPOTIFY_REDIRECT_URI')
 SPOTIFY_REFRESH_TOKEN = os.environ.get('SPOTIFY_REFRESH_TOKEN')
+TELEGRAM_CHANNEL_ID = os.environ.get('TELEGRAM_CHANNEL_ID')
+CHECK_INTERVAL_HOURS = int(os.environ.get('CHECK_INTERVAL_HOURS', 3))
 
 # Проверяем наличие токена бота
-if not TELEGRAM_TOKEN:
-    logger.error("TELEGRAM_TOKEN не найден в переменных окружения!")
+if not TELEGRAM_BOT_TOKEN:
+    logger.error("TELEGRAM_BOT_TOKEN не найден в переменных окружения!")
     # Выводим все переменные окружения для диагностики (без значений токенов)
     for key in os.environ:
         value = os.environ[key]
@@ -33,12 +35,12 @@ if not TELEGRAM_TOKEN:
         else:
             logger.info(f"Переменная окружения: {key} = {value}")
     
-    # Можно использовать тестовый токен для отладки или просто завершить программу
-    raise ValueError("TELEGRAM_TOKEN не определен в переменных окружения!")
+    # Завершаем программу с ошибкой
+    raise ValueError("TELEGRAM_BOT_TOKEN не определен в переменных окружения!")
 
 # Инициализация бота Telegram
-logger.info(f"Инициализация бота с токеном (первые 5 символов): {TELEGRAM_TOKEN[:5]}***")
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
+logger.info(f"Инициализация бота с токеном (первые 5 символов): {TELEGRAM_BOT_TOKEN[:5]}***")
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 # Инициализация Spotify OAuth
 sp_oauth = SpotifyOAuth(
@@ -104,9 +106,9 @@ if __name__ == '__main__':
                         logger.error(f"Ошибка при обновлении токена: {e}")
                     last_token_refresh = time.time()
                 
-                # Проверяем новые релизы каждые 3 часа
-                if time.time() - last_check_time > 3 * 60 * 60:
-                    logger.info("Проверка новых релизов...")
+                # Проверяем новые релизы каждые N часов (из переменной окружения)
+                if time.time() - last_check_time > CHECK_INTERVAL_HOURS * 60 * 60:
+                    logger.info(f"Проверка новых релизов (интервал: {CHECK_INTERVAL_HOURS} ч)...")
                     check_followed_artists_releases()
                     last_check_time = time.time()
                 
