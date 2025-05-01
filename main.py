@@ -100,6 +100,129 @@ def remove_from_queue(index):
         return True, item
     return False, None
 
+# Функция для обработки ссылок Spotify
+def process_spotify_link(url):
+    """Обрабатывает ссылку Spotify и возвращает информацию о релизе"""
+    try:
+        logger.info(f"Обработка ссылки Spotify: {url}")
+        
+        # Проверка, что это действительно ссылка Spotify
+        if "spotify.com" not in url:
+            return None, "Это не ссылка Spotify"
+        
+        # Обработка разных типов ссылок Spotify
+        if "/album/" in url:
+            # Ссылка на альбом
+            album_id = url.split("/album/")[1].split("?")[0]
+            
+            # Если Spotify API не инициализирован, возвращаем базовую информацию
+            if sp is None:
+                return {
+                    "type": "release",
+                    "album_id": album_id,
+                    "url": url,
+                    "source": "manual"
+                }, None
+            
+            # Если API инициализирован, получаем дополнительную информацию
+            try:
+                album_info = sp.album(album_id)
+                return {
+                    "type": "release",
+                    "artist": album_info["artists"][0]["name"],
+                    "album": album_info["name"],
+                    "album_id": album_id,
+                    "url": url,
+                    "release_date": album_info.get("release_date"),
+                    "source": "manual"
+                }, None
+            except Exception as e:
+                logger.error(f"Ошибка при получении информации о альбоме из Spotify: {e}")
+                return {
+                    "type": "release",
+                    "album_id": album_id,
+                    "url": url,
+                    "source": "manual"
+                }, None
+        
+        elif "/track/" in url:
+            # Ссылка на трек
+            track_id = url.split("/track/")[1].split("?")[0]
+            
+            # Базовая информация без API
+            if sp is None:
+                return {
+                    "type": "track",
+                    "track_id": track_id,
+                    "url": url,
+                    "source": "manual"
+                }, None
+            
+            # Если API инициализирован, получаем дополнительную информацию
+            try:
+                track_info = sp.track(track_id)
+                return {
+                    "type": "track",
+                    "artist": track_info["artists"][0]["name"],
+                    "track": track_info["name"],
+                    "album": track_info["album"]["name"],
+                    "track_id": track_id,
+                    "url": url,
+                    "source": "manual"
+                }, None
+            except Exception as e:
+                logger.error(f"Ошибка при получении информации о треке из Spotify: {e}")
+                return {
+                    "type": "track",
+                    "track_id": track_id,
+                    "url": url,
+                    "source": "manual"
+                }, None
+        
+        elif "/artist/" in url:
+            # Ссылка на артиста
+            artist_id = url.split("/artist/")[1].split("?")[0]
+            
+            # Базовая информация без API
+            if sp is None:
+                return {
+                    "type": "artist",
+                    "artist_id": artist_id,
+                    "url": url,
+                    "source": "manual"
+                }, None
+            
+            # Если API инициализирован, получаем дополнительную информацию
+            try:
+                artist_info = sp.artist(artist_id)
+                return {
+                    "type": "artist",
+                    "artist": artist_info["name"],
+                    "artist_id": artist_id,
+                    "url": url,
+                    "source": "manual"
+                }, None
+            except Exception as e:
+                logger.error(f"Ошибка при получении информации о артисте из Spotify: {e}")
+                return {
+                    "type": "artist",
+                    "artist_id": artist_id,
+                    "url": url,
+                    "source": "manual"
+                }, None
+        
+        else:
+            # Другой тип ссылки Spotify
+            return {
+                "type": "unknown",
+                "url": url,
+                "source": "manual"
+            }, None
+            
+    except Exception as e:
+        logger.error(f"Ошибка при обработке ссылки Spotify: {e}")
+        return None, f"Ошибка при обработке ссылки: {str(e)}"
+
 # Функции для проверки релизов и очереди
 def check_followed_artists_releases():
     try:
@@ -123,9 +246,20 @@ def check_and_post_from_queue():
         
         try:
             # Пытаемся опубликовать в канал
-            # Пример: 
-            # message = f"🎵 Новый релиз!\n\n{item['artist']} - {item['album']}\n\n{item['url']}"
-            # bot.send_message(TELEGRAM_CHANNEL_ID, message)
+            if isinstance(item, dict):
+                if item.get("type") == "release" and "artist" in item and "album" in item:
+                    message = f"🎵 Новый релиз!\n\n👤 {item['artist']}\n💿 {item['album']}\n\n🔗 {item['url']}"
+                elif item.get("type") == "track" and "artist" in item and "track" in item:
+                    message = f"🎵 Новый трек!\n\n👤 {item['artist']}\n🎧 {item['track']}\n\n🔗 {item['url']}"
+                elif item.get("type") == "artist" and "artist" in item:
+                    message = f"👤 {item['artist']}\n\n🔗 {item['url']}"
+                else:
+                    message = f"🔗 {item.get('url', 'Ссылка отсутствует')}"
+            else:
+                message = str(item)
+                
+            bot.send_message(TELEGRAM_CHANNEL_ID, message)
+            logger.info(f"Сообщение успешно отправлено в канал: {TELEGRAM_CHANNEL_ID}")
             
             # Если публикация успешна, удаляем из очереди
             remove_from_queue(0)
@@ -148,7 +282,8 @@ def send_welcome(message):
         "/queue - показать очередь публикаций\n"
         "/queue_remove [номер] - удалить элемент из очереди\n"
         "/queue_clear - очистить всю очередь\n"
-        "/status - показать статус бота"
+        "/status - показать статус бота\n\n"
+        "Вы также можете отправить мне ссылку на Spotify (альбом, трек или артиста), и я добавлю её в очередь публикаций."
     )
     bot.reply_to(message, help_text)
 
@@ -240,8 +375,36 @@ def bot_status(message):
 
 @bot.message_handler(func=lambda message: True)
 def echo_all(message):
-    logger.info(f"Получено неизвестное сообщение от пользователя {message.from_user.id}: {message.text}")
-    bot.reply_to(message, "Я понимаю только команды. Используйте /help для получения списка команд.")
+    logger.info(f"Получено сообщение от пользователя {message.from_user.id}: {message.text}")
+    
+    # Проверяем, содержит ли сообщение ссылку Spotify
+    if "spotify.com" in message.text.lower():
+        # Обрабатываем ссылку
+        item, error = process_spotify_link(message.text.strip())
+        
+        if error:
+            bot.reply_to(message, f"❌ {error}")
+            return
+        
+        if item:
+            # Добавляем в очередь
+            add_to_queue(item)
+            
+            # Формируем ответное сообщение
+            if item["type"] == "release" and "artist" in item and "album" in item:
+                reply = f"✅ Добавлено в очередь:\n🎵 {item['artist']} - {item['album']}"
+            elif item["type"] == "track" and "artist" in item and "track" in item:
+                reply = f"✅ Добавлено в очередь:\n🎵 {item['artist']} - {item['track']}"
+            elif item["type"] == "artist" and "artist" in item:
+                reply = f"✅ Добавлено в очередь:\n👤 {item['artist']}"
+            else:
+                reply = f"✅ Ссылка добавлена в очередь публикаций"
+            
+            bot.reply_to(message, reply)
+            return
+    
+    # Если это не ссылка Spotify или обработка не удалась
+    bot.reply_to(message, "Я понимаю только команды и ссылки Spotify. Используйте /help для получения списка команд.")
 
 # Отслеживаем время запуска бота
 start_time = time.time()
