@@ -248,17 +248,46 @@ def check_and_post_from_queue():
             # Пытаемся опубликовать в канал
             if isinstance(item, dict):
                 if item.get("type") == "release" and "artist" in item and "album" in item:
-                    message = f"🎵 Новый релиз!\n\n👤 {item['artist']}\n💿 {item['album']}\n\n🔗 {item['url']}"
+                    # Форматирование для альбома
+                    message = (
+                        f"💿 <b>НОВЫЙ АЛЬБОМ</b>\n\n"
+                        f"👤 <b>{item['artist']}</b>\n"
+                        f"🎵 <b>{item['album']}</b>\n\n"
+                        f"🔗 {item['url']}"
+                    )
+                elif item.get("type") == "release" and "album_id" in item:
+                    # Если нет полной информации об альбоме
+                    message = (
+                        f"💿 <b>НОВЫЙ РЕЛИЗ</b>\n\n"
+                        f"🔗 {item['url']}"
+                    )
                 elif item.get("type") == "track" and "artist" in item and "track" in item:
-                    message = f"🎵 Новый трек!\n\n👤 {item['artist']}\n🎧 {item['track']}\n\n🔗 {item['url']}"
+                    # Форматирование для трека
+                    message = (
+                        f"🎧 <b>НОВЫЙ ТРЕК</b>\n\n"
+                        f"👤 <b>{item['artist']}</b>\n"
+                        f"🎵 <b>{item['track']}</b>\n\n"
+                        f"🔗 {item['url']}"
+                    )
                 elif item.get("type") == "artist" and "artist" in item:
-                    message = f"👤 {item['artist']}\n\n🔗 {item['url']}"
+                    # Форматирование для артиста
+                    message = (
+                        f"👤 <b>АРТИСТ</b>\n\n"
+                        f"<b>{item['artist']}</b>\n\n"
+                        f"🔗 {item['url']}"
+                    )
                 else:
-                    message = f"🔗 {item.get('url', 'Ссылка отсутствует')}"
+                    # Для неизвестного типа или неполных данных
+                    message = (
+                        f"🎵 <b>НОВЫЙ КОНТЕНТ</b>\n\n"
+                        f"🔗 {item.get('url', 'Ссылка отсутствует')}"
+                    )
             else:
+                # Если элемент очереди не словарь
                 message = str(item)
-                
-            bot.send_message(TELEGRAM_CHANNEL_ID, message)
+            
+            # Отправляем сообщение в канал с HTML-форматированием
+            bot.send_message(TELEGRAM_CHANNEL_ID, message, parse_mode="HTML")
             logger.info(f"Сообщение успешно отправлено в канал: {TELEGRAM_CHANNEL_ID}")
             
             # Если публикация успешна, удаляем из очереди
@@ -307,13 +336,19 @@ def show_queue(message):
         return
     
     # Формируем сообщение с текущей очередью
-    queue_message = "🔄 Текущая очередь публикаций:\n\n"
+    queue_message = "🔄 <b>Текущая очередь публикаций:</b>\n\n"
     for i, item in enumerate(current_queue):
         try:
             # Предполагаем, что item - это словарь с информацией о релизе
-            # Формат элемента очереди может быть разным, адаптируйте под свой формат
-            if isinstance(item, dict) and 'type' in item and item['type'] == 'release':
-                queue_message += f"{i+1}. {item.get('artist', 'Неизвестный артист')} - {item.get('album', 'Неизвестный альбом')}\n"
+            if isinstance(item, dict):
+                if item.get("type") == "release" and "artist" in item and "album" in item:
+                    queue_message += f"{i+1}. 💿 <b>{item['artist']}</b> - <b>{item['album']}</b>\n"
+                elif item.get("type") == "track" and "artist" in item and "track" in item:
+                    queue_message += f"{i+1}. 🎧 <b>{item['artist']}</b> - <b>{item['track']}</b>\n"
+                elif item.get("type") == "artist" and "artist" in item:
+                    queue_message += f"{i+1}. 👤 <b>{item['artist']}</b>\n"
+                else:
+                    queue_message += f"{i+1}. 🔗 {item.get('url', 'Ссылка')}\n"
             else:
                 queue_message += f"{i+1}. {str(item)}\n"
         except Exception as e:
@@ -323,7 +358,7 @@ def show_queue(message):
     # Добавляем инструкцию по управлению очередью
     queue_message += "\nДля удаления элемента из очереди отправьте: /queue_remove [номер]"
     
-    bot.reply_to(message, queue_message)
+    bot.reply_to(message, queue_message, parse_mode="HTML")
 
 @bot.message_handler(commands=['queue_remove'])
 def remove_queue_item(message):
@@ -392,15 +427,15 @@ def echo_all(message):
             
             # Формируем ответное сообщение
             if item["type"] == "release" and "artist" in item and "album" in item:
-                reply = f"✅ Добавлено в очередь:\n🎵 {item['artist']} - {item['album']}"
+                reply = f"✅ Добавлено в очередь:\n💿 <b>{item['artist']}</b> - <b>{item['album']}</b>"
             elif item["type"] == "track" and "artist" in item and "track" in item:
-                reply = f"✅ Добавлено в очередь:\n🎵 {item['artist']} - {item['track']}"
+                reply = f"✅ Добавлено в очередь:\n🎧 <b>{item['artist']}</b> - <b>{item['track']}</b>"
             elif item["type"] == "artist" and "artist" in item:
-                reply = f"✅ Добавлено в очередь:\n👤 {item['artist']}"
+                reply = f"✅ Добавлено в очередь:\n👤 <b>{item['artist']}</b>"
             else:
                 reply = f"✅ Ссылка добавлена в очередь публикаций"
             
-            bot.reply_to(message, reply)
+            bot.reply_to(message, reply, parse_mode="HTML")
             return
     
     # Если это не ссылка Spotify или обработка не удалась
