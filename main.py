@@ -1,3 +1,56 @@
+import logging
+import time
+import threading
+import traceback
+import os
+import spotipy
+import telebot
+from spotipy.oauth2 import SpotifyOAuth
+
+# Настройка логгера
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Получаем данные из переменных окружения Railway
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
+SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
+SPOTIFY_REDIRECT_URI = os.environ.get('SPOTIFY_REDIRECT_URI')
+SPOTIFY_REFRESH_TOKEN = os.environ.get('SPOTIFY_REFRESH_TOKEN')
+
+# Инициализация бота Telegram
+bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
+# Инициализация Spotify OAuth
+sp_oauth = SpotifyOAuth(
+    client_id=SPOTIFY_CLIENT_ID,
+    client_secret=SPOTIFY_CLIENT_SECRET,
+    redirect_uri=SPOTIFY_REDIRECT_URI
+)
+
+# Инициализация переменной для хранения объекта Spotify
+spotify_refresh_token = SPOTIFY_REFRESH_TOKEN
+sp = None  # Будет инициализирован при первом обновлении токена
+
+# Функции для проверки релизов и очереди
+def check_followed_artists_releases():
+    try:
+        logger.info("Проверяем новые релизы артистов...")
+        # Ваш код для проверки релизов
+    except Exception as e:
+        logger.error(f"Ошибка при проверке релизов: {e}")
+        logger.error(traceback.format_exc())
+
+def check_and_post_from_queue():
+    try:
+        # Ваш код для проверки и обработки очереди
+        pass
+    except Exception as e:
+        logger.error(f"Ошибка при обработке очереди: {e}")
+
 if __name__ == '__main__':
     logger.info("Запуск бота...")
     
