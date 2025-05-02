@@ -64,8 +64,12 @@ class SpotifyManager:
         """Возвращает клиент Spotify, обновляя токен при необходимости"""
         # Всегда обновляем токен перед использованием API
         # Это гарантирует, что у нас всегда будет действующий токен
-        self.refresh_token_if_needed()
-        return self.client
+        try:
+            self.refresh_token_if_needed()
+            return self.client
+        except Exception as e:
+            logger.error(f"Ошибка при получении Spotify клиента: {e}")
+            return self.client
 
 # Класс для управления ботом Telegram 
 class TelegramBotManager:
@@ -136,140 +140,7 @@ class TelegramBotManager:
                 try:
                     # Предполагаем, что item - это словарь с информацией о релизе
                     if isinstance(item, dict):
-                        if genres:
-                            message += f"Жанры: {' '.join(genres)}\n\n"
-                        
-                        message += f"{item['url']}"
-                        
-                    else:
-                        # Для неизвестного типа или неполных данных
-                        message = f"Новый контент на Spotify\n\n{item.get('url', 'Ссылка отсутствует')}"
-                else:
-                    # Если элемент очереди не словарь
-                    message = str(item)
-                
-                # Отправляем сообщение в канал с HTML-форматированием
-                self.bot.send_message(TELEGRAM_CHANNEL_ID, message, parse_mode="HTML")
-                logger.info(f"Сообщение успешно отправлено в канал: {TELEGRAM_CHANNEL_ID}")
-                
-                # Если публикация успешна, удаляем из очереди
-                self.remove_from_queue(0)
-            except Exception as e:
-                logger.error(f"Ошибка при публикации: {e}")
-                logger.error(traceback.format_exc())
-        except Exception as e:
-            logger.error(f"Ошибка при обработке очереди: {e}")
-            logger.error(traceback.format_exc())
-
-    def start_polling(self):
-        """Запускает бота в режиме polling"""
-        self.is_running = True
-        logger.info("Запуск бота в режиме polling...")
-        
-        try:
-            # Сбрасываем webhook, чтобы не было конфликтов
-            self.bot.remove_webhook()
-            
-            # Запускаем бота в режиме polling в отдельном потоке
-            polling_thread = threading.Thread(target=self._polling_thread, daemon=True)
-            polling_thread.start()
-            
-            return True
-        except Exception as e:
-            logger.error(f"Ошибка при запуске бота: {e}")
-            self.is_running = False
-            return False
-    
-    def _polling_thread(self):
-        """Поток для обработки polling"""
-        while self.is_running:
-            try:
-                # Используем обычный polling без вложенных циклов
-                self.bot.polling(none_stop=True, interval=3, timeout=30)
-            except Exception as e:
-                logger.error(f"Ошибка в polling: {e}")
-                logger.error(traceback.format_exc())
-                time.sleep(10)  # Пауза перед повторной попыткой
-    
-    def run_background_tasks(self):
-        """Запускает фоновые задачи"""
-        last_check_time = time.time()
-        last_queue_check = time.time()
-        last_token_refresh = time.time()
-        
-        while self.is_running:
-            try:
-                # Обновляем токен каждый час
-                if time.time() - last_token_refresh > 60 * 60:
-                    logger.info("Обновляем токен Spotify...")
-                    self.spotify_manager.refresh_token_if_needed()
-                    last_token_refresh = time.time()
-                
-                # Проверяем новые релизы каждые N часов
-                if time.time() - last_check_time > CHECK_INTERVAL_HOURS * 60 * 60:
-                    logger.info(f"Проверка новых релизов (интервал: {CHECK_INTERVAL_HOURS} ч)...")
-                    self.check_followed_artists_releases()
-                    last_check_time = time.time()
-                
-                # Проверяем очередь каждую минуту
-                if time.time() - last_queue_check > 60:
-                    self.check_and_post_from_queue()
-                    last_queue_check = time.time()
-                
-                time.sleep(1)
-            except Exception as e:
-                logger.error(f"Ошибка в фоновых задачах: {e}")
-                logger.error(traceback.format_exc())
-                time.sleep(5)
-    
-    def stop(self):
-        """Останавливает бота"""
-        self.is_running = False
-        self.bot.stop_polling()
-        logger.info("Бот остановлен")
-
-# Основная функция
-def main():
-    # Инициализация Spotify OAuth
-    sp_oauth = SpotifyOAuth(
-        client_id=SPOTIFY_CLIENT_ID,
-        client_secret=SPOTIFY_CLIENT_SECRET,
-        redirect_uri=SPOTIFY_REDIRECT_URI
-    )
-    
-    # Создаем менеджер Spotify
-    spotify_manager = SpotifyManager(sp_oauth, SPOTIFY_REFRESH_TOKEN)
-    
-    # Инициализируем Spotify API
-    spotify_manager.initialize()
-    
-    # Создаем и инициализируем бота
-    bot_manager = TelegramBotManager(TELEGRAM_BOT_TOKEN, spotify_manager)
-    if not bot_manager.initialize():
-        logger.error("Не удалось инициализировать бота. Завершение работы.")
-        return
-    
-    # Запускаем фоновые задачи в отдельном потоке
-    background_thread = threading.Thread(target=bot_manager.run_background_tasks, daemon=True)
-    background_thread.start()
-    
-    # Запускаем бота
-    bot_manager.start_polling()
-    
-    # Держим основной поток активным
-    try:
-        while True:
-            time.sleep(60)
-    except KeyboardInterrupt:
-        logger.info("Получен сигнал прерывания. Останавливаем бота...")
-        bot_manager.stop()
-    except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
-        logger.error(traceback.format_exc())
-        bot_manager.stop()
-
-if __name__ == "__main__":
-    main() item.get("type") == "release" and "artist" in item and "album" in item:
+                        if item.get("type") == "release" and "artist" in item and "album" in item:
                             queue_message += f"{i+1}. 💿 <b>{item['artist']}</b> - <b>{item['album']}</b>\n"
                         elif item.get("type") == "track" and "artist" in item and "track" in item:
                             queue_message += f"{i+1}. 🎧 <b>{item['artist']}</b> - <b>{item['track']}</b>\n"
@@ -712,6 +583,147 @@ if __name__ == "__main__":
                                 logger.error(f"Ошибка при получении жанров артиста из Spotify: {e}")
                         
                         if genres:
+                            message += f"Жанры: {' '.join(genres)}\n\n"
+                        
+                        message += f"{item['url']}"
+                        
+                    else:
+                        # Для неизвестного типа или неполных данных
+                        message = f"Новый контент на Spotify\n\n{item.get('url', 'Ссылка отсутствует')}"
+                else:
+                    # Если элемент очереди не словарь
+                    message = str(item)
+                
+                # Отправляем сообщение в канал с HTML-форматированием
+                self.bot.send_message(TELEGRAM_CHANNEL_ID, message, parse_mode="HTML")
+                logger.info(f"Сообщение успешно отправлено в канал: {TELEGRAM_CHANNEL_ID}")
+                
+                # Если публикация успешна, удаляем из очереди
+                self.remove_from_queue(0)
+            except Exception as e:
+                logger.error(f"Ошибка при публикации: {e}")
+                logger.error(traceback.format_exc())
+        except Exception as e:
+            logger.error(f"Ошибка при обработке очереди: {e}")
+            logger.error(traceback.format_exc())
+
+    def start_polling(self):
+        """Запускает бота в режиме polling"""
+        self.is_running = True
+        logger.info("Запуск бота в режиме polling...")
+        
+        try:
+            # Сбрасываем webhook, чтобы не было конфликтов
+            self.bot.remove_webhook()
+            
+            # Запускаем бота в режиме polling в отдельном потоке
+            polling_thread = threading.Thread(target=self._polling_thread, daemon=True)
+            polling_thread.start()
+            
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при запуске бота: {e}")
+            self.is_running = False
+            return False
+    
+    def _polling_thread(self):
+        """Поток для обработки polling"""
+        while self.is_running:
+            try:
+                # Используем обычный polling без вложенных циклов
+                self.bot.polling(none_stop=True, interval=3, timeout=30)
+            except Exception as e:
+                logger.error(f"Ошибка в polling: {e}")
+                logger.error(traceback.format_exc())
+                time.sleep(10)  # Пауза перед повторной попыткой
+    
+    def run_background_tasks(self):
+        """Запускает фоновые задачи"""
+        last_check_time = time.time()
+        last_queue_check = time.time()
+        last_token_refresh = time.time()
+        
+        while self.is_running:
+            try:
+                # Обновляем токен каждый час
+                if time.time() - last_token_refresh > 60 * 60:
+                    logger.info("Обновляем токен Spotify...")
+                    self.spotify_manager.refresh_token_if_needed()
+                    last_token_refresh = time.time()
+                
+                # Проверяем новые релизы каждые N часов
+                if time.time() - last_check_time > CHECK_INTERVAL_HOURS * 60 * 60:
+                    logger.info(f"Проверка новых релизов (интервал: {CHECK_INTERVAL_HOURS} ч)...")
+                    self.check_followed_artists_releases()
+                    last_check_time = time.time()
+                
+                # Проверяем очередь каждую минуту
+                if time.time() - last_queue_check > 60:
+                    self.check_and_post_from_queue()
+                    last_queue_check = time.time()
+                
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"Ошибка в фоновых задачах: {e}")
+                logger.error(traceback.format_exc())
+                time.sleep(5)
+    
+    def stop(self):
+        """Останавливает бота"""
+        self.is_running = False
+        self.bot.stop_polling()
+        logger.info("Бот остановлен")
+
+# Основная функция
+def main():
+    # Инициализация Spotify OAuth
+    sp_oauth = SpotifyOAuth(
+        client_id=SPOTIFY_CLIENT_ID,
+        client_secret=SPOTIFY_CLIENT_SECRET,
+        redirect_uri=SPOTIFY_REDIRECT_URI
+    )
+    
+    # Создаем менеджер Spotify
+    spotify_manager = SpotifyManager(sp_oauth, SPOTIFY_REFRESH_TOKEN)
+    
+    # Инициализируем Spotify API
+    spotify_manager.initialize()
+    
+    # Создаем и инициализируем бота
+    bot_manager = TelegramBotManager(TELEGRAM_BOT_TOKEN, spotify_manager)
+    if not bot_manager.initialize():
+        logger.error("Не удалось инициализировать бота. Завершение работы.")
+        return
+    
+    # Запускаем фоновые задачи в отдельном потоке
+    background_thread = threading.Thread(target=bot_manager.run_background_tasks, daemon=True)
+    background_thread.start()
+    
+    # Запускаем бота
+    bot_manager.start_polling()
+    
+    # Держим основной поток активным
+    try:
+        while True:
+            time.sleep(60)
+    except KeyboardInterrupt:
+        logger.info("Получен сигнал прерывания. Останавливаем бота...")
+        bot_manager.stop()
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}")
+        logger.error(traceback.format_exc())
+        bot_manager.stop()
+
+if __name__ == "__main__":
+    main()
+                            try:
+                                artist_info = sp.artist(item["artist_id"])
+                                if "genres" in artist_info and artist_info["genres"]:
+                                    genres = ["#" + genre.replace(" ", "_") for genre in artist_info["genres"][:3]]
+                            except Exception as e:
+                                logger.error(f"Ошибка при получении жанров артиста из Spotify: {e}")
+                        
+                        if genres:
                             message += f"Жанры: {' '.join(genres)}\n"
                         
                         message += f"\n{item['url']}"
@@ -725,11 +737,3 @@ if __name__ == "__main__":
                         # Пытаемся получить жанры, если доступен Spotify API
                         genres = []
                         if sp and "artist_id" in item:
-                            try:
-                                artist_info = sp.artist(item["artist_id"])
-                                if "genres" in artist_info and artist_info["genres"]:
-                                    genres = ["#" + genre.replace(" ", "_") for genre in artist_info["genres"][:3]]
-                            except Exception as e:
-                                logger.error(f"Ошибка при получении жанров артиста из Spotify: {e}")
-                        
-                        if
