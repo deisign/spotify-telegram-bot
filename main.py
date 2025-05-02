@@ -643,7 +643,7 @@ if __name__ == '__main__':
     # Инициализируем Spotify API
     try:
         token_info = sp_oauth.refresh_access_token(spotify_refresh_token)
-        global sp
+        # Используем глобальную переменную sp
         sp = spotipy.Spotify(auth=token_info['access_token'])
         logger.info("Токен Spotify успешно инициализирован")
     except Exception as e:
