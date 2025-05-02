@@ -43,12 +43,47 @@ sp_oauth = SpotifyOAuth(
     redirect_uri=SPOTIFY_REDIRECT_URI
 )
 
-# Инициализация переменной для хранения объекта Spotify
-spotify_refresh_token = SPOTIFY_REFRESH_TOKEN
-sp = None  # Будет инициализирован при первом обновлении токена
+# Глобальные переменные
+spotify_client = None  # Объект для взаимодействия с API Spotify
+queue = []  # Очередь публикаций
 
-# Структура для хранения очереди публикаций
-queue = []
+# Класс для управления Spotify клиентом
+class SpotifyManager:
+    def __init__(self, oauth, refresh_token):
+        self.oauth = oauth
+        self.refresh_token = refresh_token
+        self.client = None
+        
+    def initialize(self):
+        """Инициализирует клиент Spotify"""
+        try:
+            token_info = self.oauth.refresh_access_token(self.refresh_token)
+            self.client = spotipy.Spotify(auth=token_info['access_token'])
+            logger.info("Spotify API клиент успешно инициализирован")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при инициализации Spotify API: {e}")
+            return False
+    
+    def refresh_token_if_needed(self):
+        """Обновляет токен доступа при необходимости"""
+        try:
+            token_info = self.oauth.refresh_access_token(self.refresh_token)
+            self.client = spotipy.Spotify(auth=token_info['access_token'])
+            logger.info("Токен Spotify успешно обновлен")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении токена: {e}")
+            return False
+    
+    def get_client(self):
+        """Возвращает клиент Spotify, инициализируя его при необходимости"""
+        if self.client is None:
+            self.initialize()
+        return self.client
+
+# Создаем менеджер Spotify
+spotify_manager = SpotifyManager(sp_oauth, SPOTIFY_REFRESH_TOKEN)
 
 # Функции для работы с очередью
 def add_to_queue(item):
@@ -77,6 +112,9 @@ def process_spotify_link(url):
         # Проверка, что это действительно ссылка Spotify
         if "spotify.com" not in url:
             return None, "Это не ссылка Spotify"
+        
+        # Получаем клиент Spotify
+        sp = spotify_manager.get_client()
         
         # Обработка разных типов ссылок Spotify
         if "/album/" in url:
@@ -196,6 +234,9 @@ def check_followed_artists_releases():
     try:
         logger.info("Проверяем новые релизы артистов...")
         
+        # Получаем клиент Spotify
+        sp = spotify_manager.get_client()
+        
         # Проверяем, есть ли доступ к Spotify API
         if sp is None:
             logger.error("API Spotify не инициализирован. Невозможно проверить новые релизы.")
@@ -305,6 +346,9 @@ def check_and_post_from_queue():
         logger.info(f"Публикация из очереди: {item}")
         
         try:
+            # Получаем клиент Spotify для дополнительной информации
+            sp = spotify_manager.get_client()
+            
             # Пытаемся опубликовать в канал в соответствии с требуемым форматом
             if isinstance(item, dict):
                 if item.get("type") == "release":
@@ -596,16 +640,10 @@ def run_background_tasks():
             # Обновляем токен каждый час
             if time.time() - last_token_refresh > 60 * 60:
                 logger.info("Обновляем токен Spotify...")
-                try:
-                    token_info = sp_oauth.refresh_access_token(spotify_refresh_token)
-                    global sp
-                    sp = spotipy.Spotify(auth=token_info['access_token'])
-                    logger.info("Токен Spotify успешно обновлен")
-                except Exception as e:
-                    logger.error(f"Ошибка при обновлении токена: {e}")
+                spotify_manager.refresh_token_if_needed()
                 last_token_refresh = time.time()
             
-            # Проверяем новые релизы каждые N часов (из переменной окружения)
+            # Проверяем новые релизы каждые N часов
             if time.time() - last_check_time > CHECK_INTERVAL_HOURS * 60 * 60:
                 logger.info(f"Проверка новых релизов (интервал: {CHECK_INTERVAL_HOURS} ч)...")
                 check_followed_artists_releases()
@@ -625,44 +663,38 @@ def run_background_tasks():
 
 # Главная функция
 if __name__ == '__main__':
-    # Проверяем и удаляем webhook для избежания конфликтов
-    bot.remove_webhook()
-    time.sleep(0.5)
-    
-    # Получаем URL для webhook
-    webhook_host = os.environ.get('RAILWAY_STATIC_URL')
-    if not webhook_host:
-        webhook_host = f"{os.environ.get('RAILWAY_PUBLIC_DOMAIN', 'localhost')}"
-    
-    webhook_url = f"https://{webhook_host}/webhook/{TELEGRAM_BOT_TOKEN}"
-    
-    # Настраиваем webhook
-    bot.set_webhook(url=webhook_url)
-    logger.info(f"Webhook установлен по адресу: {webhook_url}")
-    
-    # Инициализируем Spotify API
     try:
-        token_info = sp_oauth.refresh_access_token(spotify_refresh_token)
-        # Используем глобальную переменную sp
-        sp = spotipy.Spotify(auth=token_info['access_token'])
-        logger.info("Токен Spotify успешно инициализирован")
-    except Exception as e:
-        logger.error(f"Ошибка при инициализации токена Spotify: {e}")
-    
-    # Запускаем фоновый поток для периодических задач
-    background_thread = threading.Thread(target=run_background_tasks, daemon=True)
-    background_thread.start()
-    
-    # Запускаем проверку новых релизов при старте
-    check_thread = threading.Thread(target=check_followed_artists_releases, daemon=True)
-    check_thread.start()
-    
-    # Запускаем Flask приложение
-    port = int(os.environ.get('PORT', 8080))
-    logger.info(f"Запуск webhook сервера на порту {port}...")
-    
-    try:
+        # Инициализируем Spotify API
+        spotify_manager.initialize()
+        
+        # Проверяем и удаляем webhook для избежания конфликтов
+        bot.remove_webhook()
+        time.sleep(0.5)
+        
+        # Получаем URL для webhook
+        webhook_host = os.environ.get('RAILWAY_STATIC_URL')
+        if not webhook_host:
+            webhook_host = f"{os.environ.get('RAILWAY_PUBLIC_DOMAIN', 'localhost')}"
+        
+        webhook_url = f"https://{webhook_host}/webhook/{TELEGRAM_BOT_TOKEN}"
+        
+        # Настраиваем webhook
+        bot.set_webhook(url=webhook_url)
+        logger.info(f"Webhook установлен по адресу: {webhook_url}")
+        
+        # Запускаем фоновый поток для периодических задач
+        background_thread = threading.Thread(target=run_background_tasks, daemon=True)
+        background_thread.start()
+        
+        # Запускаем проверку новых релизов при старте
+        check_thread = threading.Thread(target=check_followed_artists_releases, daemon=True)
+        check_thread.start()
+        
+        # Запускаем Flask приложение
+        port = int(os.environ.get('PORT', 8080))
+        logger.info(f"Запуск webhook сервера на порту {port}...")
+        
         app.run(host='0.0.0.0', port=port)
     except Exception as e:
-        logger.error(f"Ошибка при запуске веб-сервера: {e}")
+        logger.error(f"Критическая ошибка при запуске бота: {e}")
         logger.error(traceback.format_exc())
