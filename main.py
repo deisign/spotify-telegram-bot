@@ -716,10 +716,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-                            try:
-                                artist_info = sp.artist(item["artist_id"])
-                                if "genres" in artist_info and artist_info["genres"]:
-                                    genres = ["#" + genre.replace(" ", "_") for genre in artist_info["genres"][:3]]
                             except Exception as e:
                                 logger.error(f"Ошибка при получении жанров артиста из Spotify: {e}")
                         
@@ -737,3 +733,7 @@ if __name__ == "__main__":
                         # Пытаемся получить жанры, если доступен Spotify API
                         genres = []
                         if sp and "artist_id" in item:
+                            try:
+                                artist_info = sp.artist(item["artist_id"])
+                                if "genres" in artist_info and artist_info["genres"]:
+                                    genres = ["#" + genre.replace(" ", "_") for genre in artist_info["genres"][:3]]
