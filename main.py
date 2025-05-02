@@ -3,11 +3,10 @@ import time
 import threading
 import traceback
 import os
-import fcntl
-import sys
 import spotipy
 import telebot
 from spotipy.oauth2 import SpotifyOAuth
+from flask import Flask, request, abort
 
 # Настройка логгера
 logging.basicConfig(
@@ -17,7 +16,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Получаем данные из переменных окружения Railway
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')  # Исправлено имя переменной
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
 SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 SPOTIFY_REDIRECT_URI = os.environ.get('SPOTIFY_REDIRECT_URI')
@@ -28,21 +27,14 @@ CHECK_INTERVAL_HOURS = int(os.environ.get('CHECK_INTERVAL_HOURS', 3))
 # Проверяем наличие токена бота
 if not TELEGRAM_BOT_TOKEN:
     logger.error("TELEGRAM_BOT_TOKEN не найден в переменных окружения!")
-    # Выводим все переменные окружения для диагностики (без значений токенов)
-    for key in os.environ:
-        value = os.environ[key]
-        # Скрываем чувствительные данные
-        if 'TOKEN' in key or 'SECRET' in key:
-            logger.info(f"Переменная окружения: {key} = ***")
-        else:
-            logger.info(f"Переменная окружения: {key} = {value}")
-    
-    # Завершаем программу с ошибкой
     raise ValueError("TELEGRAM_BOT_TOKEN не определен в переменных окружения!")
 
 # Инициализация бота Telegram
 logger.info(f"Инициализация бота с токеном (первые 5 символов): {TELEGRAM_BOT_TOKEN[:5]}***")
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+
+# Инициализация Flask приложения
+app = Flask(__name__)
 
 # Инициализация Spotify OAuth
 sp_oauth = SpotifyOAuth(
@@ -579,74 +571,85 @@ def echo_all(message):
     # Если это не ссылка Spotify или обработка не удалась
     bot.reply_to(message, "Я понимаю только команды и ссылки Spotify. Используйте /help для получения списка команд.")
 
+# Обработчик для webhook
+@app.route('/webhook/' + TELEGRAM_BOT_TOKEN, methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return ''
+    else:
+        abort(403)
+
 # Отслеживаем время запуска бота
 start_time = time.time()
 
-# Функция для запуска бота с использованием webhook
-def start_bot_with_webhook():
-    WEBHOOK_HOST = os.environ.get('WEBHOOK_HOST', f'https://{os.environ.get("RAILWAY_STATIC_URL", "")}.up.railway.app')
-    WEBHOOK_PATH = f'/webhook/{TELEGRAM_BOT_TOKEN}'
-    WEBHOOK_URL = f'{WEBHOOK_HOST}{WEBHOOK_PATH}'
+# Фоновый поток для периодических задач
+def run_background_tasks():
+    last_check_time = time.time()
+    last_queue_check = time.time()
+    last_token_refresh = time.time()
     
-    # Настраиваем webhook
+    while True:
+        try:
+            # Обновляем токен каждый час
+            if time.time() - last_token_refresh > 60 * 60:
+                logger.info("Обновляем токен Spotify...")
+                try:
+                    token_info = sp_oauth.refresh_access_token(spotify_refresh_token)
+                    global sp
+                    sp = spotipy.Spotify(auth=token_info['access_token'])
+                    logger.info("Токен Spotify успешно обновлен")
+                except Exception as e:
+                    logger.error(f"Ошибка при обновлении токена: {e}")
+                last_token_refresh = time.time()
+            
+            # Проверяем новые релизы каждые N часов (из переменной окружения)
+            if time.time() - last_check_time > CHECK_INTERVAL_HOURS * 60 * 60:
+                logger.info(f"Проверка новых релизов (интервал: {CHECK_INTERVAL_HOURS} ч)...")
+                check_followed_artists_releases()
+                last_check_time = time.time()
+            
+            # Проверяем очередь каждую минуту
+            if time.time() - last_queue_check > 60:
+                logger.debug("Проверка очереди...")
+                check_and_post_from_queue()
+                last_queue_check = time.time()
+            
+            time.sleep(1)
+        except Exception as e:
+            logger.error(f"Ошибка в фоновых задачах: {e}")
+            logger.error(traceback.format_exc())
+            time.sleep(5)
+
+# Главная функция
+if __name__ == '__main__':
+    # Проверяем и удаляем webhook для избежания конфликтов
     bot.remove_webhook()
     time.sleep(0.5)
-    bot.set_webhook(url=WEBHOOK_URL)
     
-    # Запускаем Flask-приложение для приема обновлений через webhook
-    from flask import Flask, request, abort
+    # Получаем URL для webhook
+    webhook_host = os.environ.get('RAILWAY_STATIC_URL')
+    if not webhook_host:
+        webhook_host = f"{os.environ.get('RAILWAY_PUBLIC_DOMAIN', 'localhost')}"
     
-    app = Flask(__name__)
+    webhook_url = f"https://{webhook_host}/webhook/{TELEGRAM_BOT_TOKEN}"
     
-    @app.route(WEBHOOK_PATH, methods=['POST'])
-    def webhook():
-        if request.headers.get('content-type') == 'application/json':
-            json_string = request.get_data().decode('utf-8')
-            update = telebot.types.Update.de_json(json_string)
-            bot.process_new_updates([update])
-            return ''
-        else:
-            abort(403)
+    # Настраиваем webhook
+    bot.set_webhook(url=webhook_url)
+    logger.info(f"Webhook установлен по адресу: {webhook_url}")
     
-    # Запускаем фоновые задачи
-    def run_background_tasks():
-        last_check_time = time.time()
-        last_queue_check = time.time()
-        last_token_refresh = time.time()
-        
-        while True:
-            try:
-                # Обновляем токен каждый час
-                if time.time() - last_token_refresh > 60 * 60:
-                    logger.info("Обновляем токен Spotify...")
-                    try:
-                        token_info = sp_oauth.refresh_access_token(spotify_refresh_token)
-                        global sp
-                        sp = spotipy.Spotify(auth=token_info['access_token'])
-                        logger.info("Токен Spotify успешно обновлен")
-                    except Exception as e:
-                        logger.error(f"Ошибка при обновлении токена: {e}")
-                    last_token_refresh = time.time()
-                
-                # Проверяем новые релизы каждые N часов
-                if time.time() - last_check_time > CHECK_INTERVAL_HOURS * 60 * 60:
-                    logger.info(f"Проверка новых релизов (интервал: {CHECK_INTERVAL_HOURS} ч)...")
-                    check_followed_artists_releases()
-                    last_check_time = time.time()
-                
-                # Проверяем очередь каждую минуту
-                if time.time() - last_queue_check > 60:
-                    logger.debug("Проверка очереди...")
-                    check_and_post_from_queue()
-                    last_queue_check = time.time()
-                
-                time.sleep(1)
-            except Exception as e:
-                logger.error(f"Ошибка в фоновых задачах: {e}")
-                logger.error(traceback.format_exc())
-                time.sleep(5)
+    # Инициализируем Spotify API
+    try:
+        token_info = sp_oauth.refresh_access_token(spotify_refresh_token)
+        global sp
+        sp = spotipy.Spotify(auth=token_info['access_token'])
+        logger.info("Токен Spotify успешно инициализирован")
+    except Exception as e:
+        logger.error(f"Ошибка при инициализации токена Spotify: {e}")
     
-    # Запускаем фоновые задачи в отдельном потоке
+    # Запускаем фоновый поток для периодических задач
     background_thread = threading.Thread(target=run_background_tasks, daemon=True)
     background_thread.start()
     
@@ -655,73 +658,11 @@ def start_bot_with_webhook():
     check_thread.start()
     
     # Запускаем Flask приложение
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
-
-if __name__ == '__main__':
-    # Используем try-except для красивого завершения при ошибках
+    port = int(os.environ.get('PORT', 8080))
+    logger.info(f"Запуск webhook сервера на порту {port}...")
+    
     try:
-        # Запускаем бота через webhook
-        if 'RAILWAY_STATIC_URL' in os.environ:
-            logger.info("Запуск бота с использованием webhook...")
-            start_bot_with_webhook()
-        else:
-            # Если среда не обнаружена, используем обычный polling
-            logger.info("Запуск бота с использованием polling...")
-            
-            # Запускаем фоновые задачи
-            def run_background_tasks():
-                last_check_time = time.time()
-                last_queue_check = time.time()
-                last_token_refresh = time.time()
-                
-                while True:
-                    try:
-                        # Обновляем токен каждый час
-                        if time.time() - last_token_refresh > 60 * 60:
-                            logger.info("Обновляем токен Spotify...")
-                            try:
-                                token_info = sp_oauth.refresh_access_token(spotify_refresh_token)
-                                global sp
-                                sp = spotipy.Spotify(auth=token_info['access_token'])
-                                logger.info("Токен Spotify успешно обновлен")
-                            except Exception as e:
-                                logger.error(f"Ошибка при обновлении токена: {e}")
-                            last_token_refresh = time.time()
-                        
-                        # Проверяем новые релизы каждые N часов
-                        if time.time() - last_check_time > CHECK_INTERVAL_HOURS * 60 * 60:
-                            logger.info(f"Проверка новых релизов (интервал: {CHECK_INTERVAL_HOURS} ч)...")
-                            check_followed_artists_releases()
-                            last_check_time = time.time()
-                        
-                        # Проверяем очередь каждую минуту
-                        if time.time() - last_queue_check > 60:
-                            logger.debug("Проверка очереди...")
-                            check_and_post_from_queue()
-                            last_queue_check = time.time()
-                        
-                        time.sleep(1)
-                    except Exception as e:
-                        logger.error(f"Ошибка в фоновых задачах: {e}")
-                        logger.error(traceback.format_exc())
-                        time.sleep(5)
-            
-            # Запускаем фоновые задачи в отдельном потоке
-            background_thread = threading.Thread(target=run_background_tasks, daemon=True)
-            background_thread.start()
-            
-            # Запускаем проверку новых релизов при старте
-            check_thread = threading.Thread(target=check_followed_artists_releases, daemon=True)
-            check_thread.start()
-            
-            # Запускаем бота один раз без цикла
-            bot.remove_webhook()
-            bot.polling(none_stop=True, timeout=60)
-            
-    except KeyboardInterrupt:
-        logger.info("Завершение работы бота по команде пользователя...")
+        app.run(host='0.0.0.0', port=port)
     except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
+        logger.error(f"Ошибка при запуске веб-сервера: {e}")
         logger.error(traceback.format_exc())
-    finally:
-        logger.info("Бот завершил работу")
