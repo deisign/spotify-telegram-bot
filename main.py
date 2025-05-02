@@ -199,13 +199,105 @@ def process_spotify_link(url):
         logger.error(f"Ошибка при обработке ссылки Spotify: {e}")
         return None, f"Ошибка при обработке ссылки: {str(e)}"
 
-# Функции для проверки релизов и очереди
+# Функция для проверки новых релизов подписанных артистов
 def check_followed_artists_releases():
     try:
         logger.info("Проверяем новые релизы артистов...")
-        # Здесь должен быть ваш код для проверки релизов
-        # Если найдены новые релизы, добавляем их в очередь
-        # Пример: add_to_queue({"type": "release", "artist": "Название артиста", "album": "Название альбома", "url": "..."})
+        
+        # Проверяем, есть ли доступ к Spotify API
+        if sp is None:
+            logger.error("API Spotify не инициализирован. Невозможно проверить новые релизы.")
+            return
+            
+        # Получаем список подписанных артистов
+        logger.info("Получаем список подписанных артистов...")
+        try:
+            # Ограничиваем количество подписок для проверки (максимум 50)
+            followed_artists = sp.current_user_followed_artists(limit=50)
+            
+            if not followed_artists or 'artists' not in followed_artists or 'items' not in followed_artists['artists']:
+                logger.info("Нет подписанных артистов или ошибка при получении списка")
+                return
+                
+            artists = followed_artists['artists']['items']
+            logger.info(f"Получен список из {len(artists)} подписанных артистов")
+            
+            # Проверяем новые релизы для каждого артиста
+            for artist in artists:
+                artist_id = artist['id']
+                artist_name = artist['name']
+                
+                logger.info(f"Проверяем новые релизы для артиста: {artist_name}")
+                
+                # Получаем последние альбомы артиста
+                albums = sp.artist_albums(artist_id, album_type='album,single', limit=3)
+                
+                if not albums or 'items' not in albums:
+                    logger.info(f"Нет доступных альбомов для артиста {artist_name}")
+                    continue
+                    
+                # Проверяем каждый альбом
+                for album in albums['items']:
+                    album_id = album['id']
+                    album_name = album['name']
+                    album_type = album['album_type']
+                    release_date = album['release_date']
+                    
+                    # Проверяем, является ли релиз новым (за последние 7 дней)
+                    try:
+                        release_date_obj = None
+                        if len(release_date) == 10:  # Формат YYYY-MM-DD
+                            release_date_obj = time.strptime(release_date, "%Y-%m-%d")
+                        elif len(release_date) == 7:  # Формат YYYY-MM
+                            release_date_obj = time.strptime(f"{release_date}-01", "%Y-%m-%d")
+                        elif len(release_date) == 4:  # Формат YYYY
+                            release_date_obj = time.strptime(f"{release_date}-01-01", "%Y-%m-%d")
+                        
+                        if release_date_obj:
+                            release_timestamp = time.mktime(release_date_obj)
+                            current_timestamp = time.time()
+                            days_since_release = (current_timestamp - release_timestamp) / (60 * 60 * 24)
+                            
+                            # Если релиз не старше 7 дней, добавляем его в очередь
+                            if days_since_release <= 7:
+                                logger.info(f"Найден новый релиз: {artist_name} - {album_name} ({release_date})")
+                                
+                                # Получаем полную информацию об альбоме
+                                album_info = sp.album(album_id)
+                                
+                                # Создаем элемент для очереди
+                                release_item = {
+                                    "type": "release",
+                                    "artist": artist_name,
+                                    "album": album_name,
+                                    "album_id": album_id,
+                                    "release_date": release_date,
+                                    "album_type": album_type,
+                                    "total_tracks": album_info.get("total_tracks", 0),
+                                    "url": album['external_urls']['spotify'],
+                                    "source": "auto",
+                                    "artist_id": artist_id
+                                }
+                                
+                                # Проверяем, есть ли уже такой релиз в очереди
+                                duplicate = False
+                                for item in queue:
+                                    if isinstance(item, dict) and item.get("album_id") == album_id:
+                                        duplicate = True
+                                        break
+                                
+                                if not duplicate:
+                                    # Добавляем в очередь
+                                    add_to_queue(release_item)
+                            else:
+                                logger.debug(f"Релиз {artist_name} - {album_name} слишком старый ({days_since_release:.1f} дней)")
+                    except Exception as e:
+                        logger.error(f"Ошибка при обработке даты релиза для {artist_name} - {album_name}: {e}")
+                        
+        except Exception as e:
+            logger.error(f"Ошибка при получении подписанных артистов: {e}")
+            logger.error(traceback.format_exc())
+            
     except Exception as e:
         logger.error(f"Ошибка при проверке релизов: {e}")
         logger.error(traceback.format_exc())
