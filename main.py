@@ -5,6 +5,7 @@ import aiogram
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import FSInputFile
+from aiogram.fsm.middleware import BaseMiddleware
 import requests
 import sqlite3
 import json
@@ -190,6 +191,30 @@ class SpotifyAPI:
                     logger.error(f"Failed to get artist releases: {await response.text()}")
                     return []
 
+    async def get_track_details(self, track_id):
+        token = await self.get_access_token()
+        if not token:
+            return None
+
+        await self.rate_limiter.acquire()
+        
+        url = f"https://api.spotify.com/v1/tracks/{track_id}"
+        headers = {"Authorization": f"Bearer {token}"}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data
+                elif response.status == 429:
+                    retry_after = int(response.headers.get('Retry-After', 60))
+                    logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
+                    await asyncio.sleep(retry_after)
+                    return await self.get_track_details(track_id)  # Retry
+                else:
+                    logger.error(f"Failed to get track details: {await response.text()}")
+                    return None
+
     async def get_album_details(self, album_id):
         token = await self.get_access_token()
         if not token:
@@ -226,7 +251,26 @@ class SpotifyAPI:
                     logger.error(f"Failed to get album details: {await response.text()}")
                     return None
 
-spotify_api = SpotifyAPI()
+# Middleware для логирования всех входящих сообщений
+async def logging_middleware(handler, event, data):
+    update_type = type(event).__name__
+    logger.info(f"Received {update_type}: {event}")
+    return await handler(event, data)
+
+# Регистрируем middleware
+dp.message.middleware(logging_middleware)
+
+# Обработчик для отладки всех сообщений
+@dp.message()
+async def debug_message(message: types.Message):
+    logger.info(f"Message received in debug handler:")
+    logger.info(f"Text: {message.text}")
+    logger.info(f"From: {message.from_user.id if message.from_user else 'Unknown'}")
+    logger.info(f"Chat: {message.chat.id}")
+    logger.info(f"Message ID: {message.message_id}")
+    
+    # Продолжаем обработку
+    await handle_url(message)
 
 # Bandcamp web scraping
 class BandcampScraper:
@@ -318,7 +362,7 @@ class Database:
     def get_queue():
         conn = Database.get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT id, artist, release, release_date, release_type, tracks_count, genres, listen_url, platform FROM post_queue ORDER BY id')
+        cursor.execute('SELECT id, artist, release, release_date, release_type, tracks_count, genres, image_url, listen_url, platform FROM post_queue ORDER BY id')
         results = cursor.fetchall()
         conn.close()
         return results
@@ -404,8 +448,11 @@ Available commands:
 /queue_remove [number] - Remove item from queue
 /queue_clear - Clear entire queue
 /status - Show bot status
+/post_fast [minutes] - Set posting interval (e.g., /post_fast 5)
 
 You can also send Spotify or Bandcamp links to add them to the queue.
+
+Default posting interval is 60 minutes between posts.
 """
     await message.reply(help_text)
 
@@ -461,8 +508,17 @@ async def cmd_queue_clear(message: types.Message):
     Database.clear_queue()
     await message.reply("✅ Queue cleared.")
 
-@dp.message(Command("status"))
-async def cmd_status(message: types.Message):
+@dp.message(Command("post_fast"))
+async def cmd_post_fast(message: types.Message):
+    """Accelerate posting - post every 5 minutes"""
+    args = message.text.split()
+    if len(args) != 2 or not args[1].isdigit():
+        await message.reply("Usage: /post_fast [minutes]\nExample: /post_fast 5")
+        return
+    
+    minutes = int(args[1])
+    Database.update_status('post_interval', str(minutes))
+    await message.reply(f"✅ Posting interval set to {minutes} minutes")
     last_check = Database.get_status('last_check')
     last_post = Database.get_status('last_post')
     
@@ -480,14 +536,21 @@ async def handle_url(message: types.Message):
     if not text:
         return
 
+    logger.info(f"Received message: {text}")
+
     # Check if message contains Spotify URL
     if 'spotify.com' in text:
+        logger.info("Found Spotify URL")
         url_match = re.search(r'https?://open\.spotify\.com/(album|track)/([a-zA-Z0-9]+)', text)
         if url_match:
             item_type, item_id = url_match.groups()
+            logger.info(f"Matched {item_type} with ID: {item_id}")
+            
             if item_type == 'album':
+                logger.info("Fetching album details...")
                 album_data = await spotify_api.get_album_details(item_id)
                 if album_data:
+                    logger.info(f"Album data received: {album_data['name']}")
                     release_data = {
                         'artist': album_data['artists'][0]['name'],
                         'release': album_data['name'],
@@ -503,9 +566,13 @@ async def handle_url(message: types.Message):
                     await message.reply("✅ Added to posting queue!")
                 else:
                     await message.reply("❌ Failed to get album details.")
+                    logger.error("Failed to get album details")
+                    
             elif item_type == 'track':
+                logger.info("Fetching track details...")
                 track_data = await spotify_api.get_track_details(item_id)
                 if track_data:
+                    logger.info(f"Track data received: {track_data['name']}")
                     # Get track's album info
                     album_id = track_data['album']['id']
                     album_data = await spotify_api.get_album_details(album_id)
@@ -525,14 +592,21 @@ async def handle_url(message: types.Message):
                         await message.reply("✅ Added to posting queue!")
                     else:
                         await message.reply("❌ Failed to get track/album details.")
+                        logger.error(f"Failed to get album details for track {item_id}")
+        else:
+            logger.info("No match found for Spotify regex")
+            await message.reply("❌ Invalid Spotify link format")
 
     # Check if message contains Bandcamp URL
     elif 'bandcamp.com' in text:
+        logger.info("Found Bandcamp URL")
         url_match = re.search(r'https?://[a-zA-Z0-9.-]+\.bandcamp\.com/album/[a-zA-Z0-9-]+', text)
         if url_match:
             url = url_match.group(0)
+            logger.info(f"Matched Bandcamp URL: {url}")
             release_info = await BandcampScraper.get_release_info(url)
             if release_info:
+                logger.info(f"Bandcamp data received: {release_info['title']}")
                 release_data = {
                     'artist': release_info['artist'],
                     'release': release_info['title'],
@@ -548,6 +622,12 @@ async def handle_url(message: types.Message):
                 await message.reply("✅ Added to posting queue!")
             else:
                 await message.reply("❌ Failed to get Bandcamp release details.")
+                logger.error(f"Failed to get Bandcamp details for {url}")
+        else:
+            logger.info("No match found for Bandcamp regex")
+            await message.reply("❌ Invalid Bandcamp link format")
+    else:
+        logger.info("Message doesn't contain Spotify or Bandcamp URL")
 
 # Check new releases
 async def check_new_releases():
@@ -671,7 +751,11 @@ async def main():
                 await post_from_queue()
             except Exception as e:
                 logger.error(f"Error in periodic post: {str(e)}")
-            await asyncio.sleep(3600)  # Post every hour
+            
+            # Check for custom posting interval
+            interval_str = Database.get_status('post_interval')
+            interval_minutes = int(interval_str) if interval_str else 60  # default 60 minutes
+            await asyncio.sleep(interval_minutes * 60)
     
     # Start tasks
     check_task = asyncio.create_task(periodic_check())
