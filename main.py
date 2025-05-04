@@ -174,31 +174,29 @@ class BandcampScraper:
                         html = await response.text()
                         soup = BeautifulSoup(html, 'html.parser')
                         
-                        # Extract artist name from URL
-                        artist_from_url = url.split('//')[1].split('.')[0]
-                        
-                        # Extract release info
+                        # Extract release title (not artist) from h2 element
                         title_elem = soup.find('h2', class_='trackTitle')
+                        raw_title = title_elem.text.strip() if title_elem else ''
+                        
+                        # Extract artist and actual title from pattern "Title, by Artist"
+                        artist_name = ''
+                        release_title = raw_title
+                        
+                        if ', by ' in raw_title:
+                            parts = raw_title.split(', by ')
+                            if len(parts) == 2:
+                                release_title = parts[0].strip()
+                                artist_name = parts[1].strip()
+                        
                         release_info = {
-                            'artist': artist_from_url.replace('-', ' ').title(),  # Extract from URL and format
-                            'title': title_elem.text.strip() if title_elem else '',
+                            'artist': artist_name,
+                            'title': release_title,
                             'release_date': '',
                             'tracks': [],
                             'genres': [],
                             'image_url': '',
                             'url': url
                         }
-                        
-                        # Try to get artist name from band-name element
-                        band_name = soup.select_one('#band-name-location .title a')
-                        if band_name:
-                            release_info['artist'] = band_name.text.strip()
-                        
-                        # Alternative attempt from page title
-                        if not release_info['artist']:
-                            page_title = soup.find('meta', property='og:site_name')
-                            if page_title:
-                                release_info['artist'] = page_title.get('content', '').strip()
                         
                         # Get cover art
                         image_elem = soup.find('div', id='tralbumArt')
@@ -229,8 +227,9 @@ class BandcampScraper:
                                 release_info['release_date'] = date_match.group(1)
                         
                         # Log the found information for debugging
-                        logger.info(f"Found artist: {release_info['artist']}")
-                        logger.info(f"Found title: {release_info['title']}")
+                        logger.info(f"Found artist: '{release_info['artist']}'")
+                        logger.info(f"Found title: '{release_info['title']}'")
+                        logger.info(f"Raw title: '{raw_title}'")
                         
                         return release_info
                     else:
@@ -373,6 +372,24 @@ def format_post(release_data):
     
     return text
 
+# Check if release is recent (within last N days)
+def is_recent_release(release_date_str, days_threshold=3):  # Changed default to 3 days
+    try:
+        # Parse different date formats (YYYY, YYYY-MM, YYYY-MM-DD)
+        if len(release_date_str) == 4:  # Year only
+            release_date = datetime.strptime(release_date_str, '%Y')
+        elif len(release_date_str) == 7:  # Year-Month
+            release_date = datetime.strptime(release_date_str, '%Y-%m')
+        else:  # Full date
+            release_date = datetime.strptime(release_date_str, '%Y-%m-%d')
+        
+        now = datetime.now()
+        days_diff = (now - release_date).days
+        return days_diff <= days_threshold
+    except:
+        # If parsing fails, consider it not recent
+        return False
+
 # Spotify check for new releases
 async def check_new_releases():
     logger.info("Starting to check for new releases...")
@@ -404,6 +421,7 @@ async def check_new_releases():
         logger.info(f"Found {len(artists)} followed artists")
         
         new_releases_count = 0
+        days_threshold = int(SupabaseDB.get_status('release_days_threshold') or '3')  # Default to 3 days
         
         # Process artists in smaller batches to avoid session issues
         for i in range(0, len(artists), 10):
@@ -418,6 +436,11 @@ async def check_new_releases():
                         if album_response.status == 200:
                             album_data = await album_response.json()
                             for album in album_data['items']:
+                                # Check if release is recent
+                                if not is_recent_release(album['release_date'], days_threshold):
+                                    logger.debug(f"Skipping old release: {album['name']} from {album['release_date']}")
+                                    continue
+                                    
                                 release_id = f"spotify_{album['id']}"
                                 if not SupabaseDB.is_posted(release_id):
                                     # Get full album details
@@ -437,7 +460,7 @@ async def check_new_releases():
                                         }
                                         SupabaseDB.add_to_queue(release_data)
                                         new_releases_count += 1
-                                        logger.info(f"Added {album_details['artists'][0]['name']} - {album_details['name']} to queue")
+                                        logger.info(f"Added {album_details['artists'][0]['name']} - {album_details['name']} (Released: {album_details['release_date']}) to queue")
         
         logger.info(f"Check completed. Added {new_releases_count} new releases to queue.")
     except Exception as e:
@@ -459,6 +482,7 @@ Available commands:
 /queue_clear - Clear entire queue
 /status - Show bot status
 /post - Post next item in queue manually
+/set_days [number] - Set days back to check (default: 3)
 
 You can also send Spotify or Bandcamp links to add them to the queue.
 """
@@ -490,6 +514,7 @@ async def cmd_queue_clear(message: Message):
 async def cmd_status(message: Message):
     last_check = SupabaseDB.get_status('last_check')
     last_post = SupabaseDB.get_status('last_post')
+    days_threshold = SupabaseDB.get_status('release_days_threshold') or '3'
     
     status_text = "🤖 *Bot Status:*\n\n"
     if last_check:
@@ -503,8 +528,27 @@ async def cmd_status(message: Message):
         status_text += "Last post: Never\n"
     
     status_text += f"Queue length: {len(SupabaseDB.get_queue())}\n"
+    status_text += f"Checking releases from last {days_threshold} days\n"
     
     await message.reply(status_text, parse_mode="MarkdownV2")
+
+@dp.message(Command("set_days"))
+async def cmd_set_days(message: Message):
+    """Set how many days back to check for new releases"""
+    try:
+        args = message.text.split()
+        if len(args) != 2 or not args[1].isdigit():
+            await message.reply("Usage: /set_days [number]\nExample: /set_days 30")
+            return
+
+        days = int(args[1])
+        SupabaseDB.update_status('release_days_threshold', str(days))
+        await message.reply(f"✅ Now checking for releases in the last {days} days")
+    except ValueError:
+        await message.reply("Invalid number format.")
+    except Exception as e:
+        logger.error(f"Error setting days threshold: {str(e)}")
+        await message.reply("❌ Error setting days threshold.")
 
 @dp.message(Command("check"))
 async def cmd_check(message: Message):
