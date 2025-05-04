@@ -405,38 +405,45 @@ async def check_new_releases():
         
         new_releases_count = 0
         
-        for artist in artists:
-            # Get artist's latest releases
-            await spotify_api.rate_limiter.acquire()
-            album_url = f"https://api.spotify.com/v1/artists/{artist['id']}/albums?include_groups=album,single&market=US&limit=5"
-            async with session.get(album_url, headers=headers) as album_response:
-                if album_response.status == 200:
-                    album_data = await album_response.json()
-                    for album in album_data['items']:
-                        release_id = f"spotify_{album['id']}"
-                        if not SupabaseDB.is_posted(release_id):
-                            # Get full album details
-                            album_details = await spotify_api.get_album_details(album['id'])
-                            if album_details:
-                                release_data = {
-                                    'artist': album_details['artists'][0]['name'],
-                                    'release': album_details['name'],
-                                    'release_date': album_details['release_date'],
-                                    'release_type': album_details['album_type'],
-                                    'tracks_count': album_details['total_tracks'],
-                                    'genres': ', '.join([f"#{g}" for g in album_details.get('genres', [])]),
-                                    'image_url': album_details['images'][0]['url'] if album_details['images'] else '',
-                                    'listen_url': album_details['external_urls']['spotify'],
-                                    'platform': 'spotify',
-                                    'created_at': datetime.now().isoformat()
-                                }
-                                SupabaseDB.add_to_queue(release_data)
-                                new_releases_count += 1
-                                logger.info(f"Added {album_details['artists'][0]['name']} - {album_details['name']} to queue")
+        # Process artists in smaller batches to avoid session issues
+        for i in range(0, len(artists), 10):
+            artist_batch = artists[i:i+10]
+            
+            async with aiohttp.ClientSession() as session:
+                for artist in artist_batch:
+                    # Get artist's latest releases
+                    await spotify_api.rate_limiter.acquire()
+                    album_url = f"https://api.spotify.com/v1/artists/{artist['id']}/albums?include_groups=album,single&market=US&limit=5"
+                    async with session.get(album_url, headers=headers) as album_response:
+                        if album_response.status == 200:
+                            album_data = await album_response.json()
+                            for album in album_data['items']:
+                                release_id = f"spotify_{album['id']}"
+                                if not SupabaseDB.is_posted(release_id):
+                                    # Get full album details
+                                    album_details = await spotify_api.get_album_details(album['id'])
+                                    if album_details:
+                                        release_data = {
+                                            'artist': album_details['artists'][0]['name'],
+                                            'release': album_details['name'],
+                                            'release_date': album_details['release_date'],
+                                            'release_type': album_details['album_type'],
+                                            'tracks_count': album_details['total_tracks'],
+                                            'genres': ', '.join([f"#{g}" for g in album_details.get('genres', [])]),
+                                            'image_url': album_details['images'][0]['url'] if album_details['images'] else '',
+                                            'listen_url': album_details['external_urls']['spotify'],
+                                            'platform': 'spotify',
+                                            'created_at': datetime.now().isoformat()
+                                        }
+                                        SupabaseDB.add_to_queue(release_data)
+                                        new_releases_count += 1
+                                        logger.info(f"Added {album_details['artists'][0]['name']} - {album_details['name']} to queue")
         
         logger.info(f"Check completed. Added {new_releases_count} new releases to queue.")
     except Exception as e:
         logger.error(f"Error in check_new_releases: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
 
 # Commands
 @dp.message(CommandStart())
