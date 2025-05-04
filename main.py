@@ -503,6 +503,28 @@ async def handle_url(message: types.Message):
                     await message.reply("✅ Added to posting queue!")
                 else:
                     await message.reply("❌ Failed to get album details.")
+            elif item_type == 'track':
+                track_data = await spotify_api.get_track_details(item_id)
+                if track_data:
+                    # Get track's album info
+                    album_id = track_data['album']['id']
+                    album_data = await spotify_api.get_album_details(album_id)
+                    if album_data:
+                        release_data = {
+                            'artist': album_data['artists'][0]['name'],
+                            'release': album_data['name'],
+                            'release_date': album_data['release_date'],
+                            'release_type': album_data['album_type'],
+                            'tracks_count': album_data['total_tracks'],
+                            'genres': ', '.join([f"#{g}" for g in album_data.get('genres', [])]),
+                            'image_url': album_data['images'][0]['url'] if album_data['images'] else '',
+                            'listen_url': album_data['external_urls']['spotify'],
+                            'platform': 'spotify'
+                        }
+                        Database.add_to_queue(release_data)
+                        await message.reply("✅ Added to posting queue!")
+                    else:
+                        await message.reply("❌ Failed to get track/album details.")
 
     # Check if message contains Bandcamp URL
     elif 'bandcamp.com' in text:
