@@ -176,7 +176,34 @@ class BandcampScraper:
                         
                         # Extract release info
                         title_elem = soup.find('h2', class_='trackTitle')
-                        artist_elem = soup.find('span', itemprop='byArtist')
+                        if not title_elem:
+                            # Try alternative selector
+                            title_elem = soup.find('h2')
+                        
+                        # Find artist in metadata OR via meta tags
+                        artist_elem = None
+                        
+                        # Method 1: Check meta tags
+                        meta_artist = soup.find('meta', property='og:site_name')
+                        if meta_artist and meta_artist.get('content'):
+                            artist_elem = meta_artist
+                        
+                        # Method 2: Check band links
+                        if not artist_elem:
+                            band_link = soup.find('p', id='band-name-location')
+                            if band_link:
+                                artist_span = band_link.find('span', class_='title')
+                                if artist_span:
+                                    artist_elem = artist_span
+                        
+                        # Method 3: Check breadcrumb
+                        if not artist_elem:
+                            breadcrumb = soup.find('div', class_='byline') or soup.find('p', class_='by-artist')
+                            if breadcrumb:
+                                artist_link = breadcrumb.find('a')
+                                if artist_link:
+                                    artist_elem = artist_link
+                        
                         release_info = {
                             'artist': artist_elem.text.strip() if artist_elem else '',
                             'title': title_elem.text.strip() if title_elem else '',
@@ -188,22 +215,27 @@ class BandcampScraper:
                         }
                         
                         # Get cover art
-                        image_elem = soup.find('div', class_='popupImage')
+                        image_elem = soup.find('div', id='tralbumArt')
                         if image_elem and image_elem.find('img'):
                             release_info['image_url'] = image_elem.find('img')['src']
                         
                         # Get track list
-                        tracks = soup.find_all('div', class_='track_row_view')
-                        release_info['tracks'] = [track.find('span', class_='track-title').text.strip() for track in tracks if track.find('span', class_='track-title')]
+                        track_table = soup.find('table', id='track_table')
+                        if track_table:
+                            track_rows = track_table.find_all('tr', class_='track_row_view')
+                            for track in track_rows:
+                                title_span = track.find('span', class_='track-title')
+                                if title_span:
+                                    release_info['tracks'].append(title_span.text.strip())
                         
                         # Get genres from tags
                         tag_elements = soup.find_all('a', class_='tag')
                         release_info['genres'] = [tag.text.strip() for tag in tag_elements[:3]]
                         
                         # Get release date
-                        album_info = soup.find('div', class_='albumInfo')
-                        if album_info:
-                            date_text = album_info.text
+                        release_date_elem = soup.find('div', class_='tralbum-credits')
+                        if release_date_elem:
+                            date_text = release_date_elem.text
                             # Parse date from text like "released April 1, 2023"
                             import re
                             date_match = re.search(r'released\s+(\w+\s+\d+,\s+\d+)', date_text)
@@ -216,6 +248,8 @@ class BandcampScraper:
                         return None
         except Exception as e:
             logger.error(f"Error scraping Bandcamp: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
 
 # Database operations with Supabase
@@ -309,18 +343,35 @@ class SupabaseDB:
             logger.error(f"Error getting status: {str(e)}")
             return None
 
+# Escape special characters for MarkdownV2
+def escape_markdown_v2(text):
+    if not text:
+        return ""
+    # Escape special characters for MarkdownV2
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
 # Format post
 def format_post(release_data):
-    text = f"*{release_data['artist']}*\n"
-    text += f"*{release_data['release']}*\n"
-    text += f"{release_data['release_date']}, {release_data['release_type']}, {release_data['tracks_count']} tracks\n"
-    text += f"Genre: {release_data['genres']}\n"
+    # Escape all text content
+    artist = escape_markdown_v2(release_data['artist'])
+    release = escape_markdown_v2(release_data['release'])
+    release_date = escape_markdown_v2(release_data['release_date'])
+    release_type = escape_markdown_v2(release_data['release_type'])
+    genres = escape_markdown_v2(release_data['genres'])
+    
+    text = f"*{artist}*\n"
+    text += f"*{release}*\n"
+    text += f"{release_date}, {release_type}, {release_data['tracks_count']} tracks\n"
+    text += f"Genre: {genres}\n"
     
     listen_emoji = "🎧"
     if release_data['platform'] == 'spotify':
-        text += f"{listen_emoji} Listen on Spotify {release_data['listen_url']}"
+        text += f"{listen_emoji} Listen on [Spotify]({release_data['listen_url']})"
     else:
-        text += f"{listen_emoji} Listen on Bandcamp {release_data['listen_url']}"
+        text += f"{listen_emoji} Listen on [Bandcamp]({release_data['listen_url']})"
     
     return text
 
@@ -352,9 +403,13 @@ async def cmd_queue(message: Message):
 
     text = "📋 *Post Queue:*\n\n"
     for idx, item in enumerate(queue, 1):
-        text += f"{idx}. {item['artist']} - {item['release']} ({item['platform']})\n"
+        # Escape special characters for MarkdownV2
+        artist = escape_markdown_v2(item['artist'])
+        release = escape_markdown_v2(item['release'])
+        platform = escape_markdown_v2(item['platform'])
+        text += f"{idx}\\. {artist} \\- {release} \\({platform}\\)\n"
     
-    await message.reply(text, parse_mode="Markdown")
+    await message.reply(text, parse_mode="MarkdownV2")
 
 @dp.message(Command("queue_clear"))
 async def cmd_queue_clear(message: Message):
@@ -367,11 +422,19 @@ async def cmd_status(message: Message):
     last_post = SupabaseDB.get_status('last_post')
     
     status_text = "🤖 *Bot Status:*\n\n"
-    status_text += f"Last check: {last_check if last_check else 'Never'}\n"
-    status_text += f"Last post: {last_post if last_post else 'Never'}\n"
+    if last_check:
+        status_text += f"Last check: {escape_markdown_v2(last_check)}\n"
+    else:
+        status_text += "Last check: Never\n"
+    
+    if last_post:
+        status_text += f"Last post: {escape_markdown_v2(last_post)}\n"
+    else:
+        status_text += "Last post: Never\n"
+    
     status_text += f"Queue length: {len(SupabaseDB.get_queue())}\n"
     
-    await message.reply(status_text, parse_mode="Markdown")
+    await message.reply(status_text, parse_mode="MarkdownV2")
 
 @dp.message(Command("post"))
 async def cmd_post(message: Message):
@@ -505,7 +568,7 @@ async def post_from_queue():
                             chat_id=TELEGRAM_CHANNEL_ID,
                             photo=photo,
                             caption=format_post(item),
-                            parse_mode="Markdown"
+                            parse_mode="MarkdownV2"
                         )
                         
                         # Clean up
@@ -515,14 +578,14 @@ async def post_from_queue():
                         await bot.send_message(
                             chat_id=TELEGRAM_CHANNEL_ID,
                             text=format_post(item),
-                            parse_mode="Markdown"
+                            parse_mode="MarkdownV2"
                         )
         else:
             # Send without image
             await bot.send_message(
                 chat_id=TELEGRAM_CHANNEL_ID,
                 text=format_post(item),
-                parse_mode="Markdown"
+                parse_mode="MarkdownV2"
             )
         
         SupabaseDB.remove_from_queue(queue_id)
