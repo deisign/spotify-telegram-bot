@@ -174,38 +174,13 @@ class BandcampScraper:
                         html = await response.text()
                         soup = BeautifulSoup(html, 'html.parser')
                         
+                        # Extract artist name from URL
+                        artist_from_url = url.split('//')[1].split('.')[0]
+                        
                         # Extract release info
                         title_elem = soup.find('h2', class_='trackTitle')
-                        if not title_elem:
-                            # Try alternative selector
-                            title_elem = soup.find('h2')
-                        
-                        # Find artist in metadata OR via meta tags
-                        artist_elem = None
-                        
-                        # Method 1: Check meta tags
-                        meta_artist = soup.find('meta', property='og:site_name')
-                        if meta_artist and meta_artist.get('content'):
-                            artist_elem = meta_artist
-                        
-                        # Method 2: Check band links
-                        if not artist_elem:
-                            band_link = soup.find('p', id='band-name-location')
-                            if band_link:
-                                artist_span = band_link.find('span', class_='title')
-                                if artist_span:
-                                    artist_elem = artist_span
-                        
-                        # Method 3: Check breadcrumb
-                        if not artist_elem:
-                            breadcrumb = soup.find('div', class_='byline') or soup.find('p', class_='by-artist')
-                            if breadcrumb:
-                                artist_link = breadcrumb.find('a')
-                                if artist_link:
-                                    artist_elem = artist_link
-                        
                         release_info = {
-                            'artist': artist_elem.text.strip() if artist_elem else '',
+                            'artist': artist_from_url.replace('-', ' ').title(),  # Extract from URL and format
                             'title': title_elem.text.strip() if title_elem else '',
                             'release_date': '',
                             'tracks': [],
@@ -213,6 +188,17 @@ class BandcampScraper:
                             'image_url': '',
                             'url': url
                         }
+                        
+                        # Try to get artist name from band-name element
+                        band_name = soup.select_one('#band-name-location .title a')
+                        if band_name:
+                            release_info['artist'] = band_name.text.strip()
+                        
+                        # Alternative attempt from page title
+                        if not release_info['artist']:
+                            page_title = soup.find('meta', property='og:site_name')
+                            if page_title:
+                                release_info['artist'] = page_title.get('content', '').strip()
                         
                         # Get cover art
                         image_elem = soup.find('div', id='tralbumArt')
@@ -242,6 +228,10 @@ class BandcampScraper:
                             if date_match:
                                 release_info['release_date'] = date_match.group(1)
                         
+                        # Log the found information for debugging
+                        logger.info(f"Found artist: {release_info['artist']}")
+                        logger.info(f"Found title: {release_info['title']}")
+                        
                         return release_info
                     else:
                         logger.error(f"Failed to fetch Bandcamp page: {response.status}")
@@ -257,6 +247,14 @@ class SupabaseDB:
     @staticmethod
     def add_to_queue(release_data):
         try:
+            # Ensure artist is set before adding to queue
+            if not release_data.get('artist') and release_data.get('platform') == 'bandcamp':
+                # Extract from URL as fallback
+                url = release_data.get('listen_url', '')
+                if 'bandcamp.com' in url:
+                    artist_from_url = url.split('//')[1].split('.')[0]
+                    release_data['artist'] = artist_from_url.replace('-', ' ').title()
+                    
             data = supabase.table('post_queue').insert(release_data).execute()
             logger.info(f"Added to queue: {data}")
             return True
@@ -375,6 +373,71 @@ def format_post(release_data):
     
     return text
 
+# Spotify check for new releases
+async def check_new_releases():
+    logger.info("Starting to check for new releases...")
+    SupabaseDB.update_status('last_check', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    
+    # Get followed artists
+    token = await spotify_api.get_access_token()
+    if not token:
+        logger.error("Failed to get access token")
+        return
+    
+    url = "https://api.spotify.com/v1/me/following?type=artist&limit=50"
+    headers = {"Authorization": f"Bearer {token}"}
+    
+    try:
+        artists = []
+        async with aiohttp.ClientSession() as session:
+            while url:
+                await spotify_api.rate_limiter.acquire()
+                async with session.get(url, headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        artists.extend(data['artists']['items'])
+                        url = data['artists']['next']
+                    else:
+                        logger.error(f"Failed to get followed artists: {await response.text()}")
+                        break
+        
+        logger.info(f"Found {len(artists)} followed artists")
+        
+        new_releases_count = 0
+        
+        for artist in artists:
+            # Get artist's latest releases
+            await spotify_api.rate_limiter.acquire()
+            album_url = f"https://api.spotify.com/v1/artists/{artist['id']}/albums?include_groups=album,single&market=US&limit=5"
+            async with session.get(album_url, headers=headers) as album_response:
+                if album_response.status == 200:
+                    album_data = await album_response.json()
+                    for album in album_data['items']:
+                        release_id = f"spotify_{album['id']}"
+                        if not SupabaseDB.is_posted(release_id):
+                            # Get full album details
+                            album_details = await spotify_api.get_album_details(album['id'])
+                            if album_details:
+                                release_data = {
+                                    'artist': album_details['artists'][0]['name'],
+                                    'release': album_details['name'],
+                                    'release_date': album_details['release_date'],
+                                    'release_type': album_details['album_type'],
+                                    'tracks_count': album_details['total_tracks'],
+                                    'genres': ', '.join([f"#{g}" for g in album_details.get('genres', [])]),
+                                    'image_url': album_details['images'][0]['url'] if album_details['images'] else '',
+                                    'listen_url': album_details['external_urls']['spotify'],
+                                    'platform': 'spotify',
+                                    'created_at': datetime.now().isoformat()
+                                }
+                                SupabaseDB.add_to_queue(release_data)
+                                new_releases_count += 1
+                                logger.info(f"Added {album_details['artists'][0]['name']} - {album_details['name']} to queue")
+        
+        logger.info(f"Check completed. Added {new_releases_count} new releases to queue.")
+    except Exception as e:
+        logger.error(f"Error in check_new_releases: {str(e)}")
+
 # Commands
 @dp.message(CommandStart())
 @dp.message(Command("help"))
@@ -435,6 +498,16 @@ async def cmd_status(message: Message):
     status_text += f"Queue length: {len(SupabaseDB.get_queue())}\n"
     
     await message.reply(status_text, parse_mode="MarkdownV2")
+
+@dp.message(Command("check"))
+async def cmd_check(message: Message):
+    await message.reply("🔍 Checking for new releases...")
+    try:
+        await check_new_releases()
+        await message.reply("✅ Check completed!")
+    except Exception as e:
+        logger.error(f"Error checking releases: {str(e)}")
+        await message.reply("❌ Error checking releases. Check logs for details.")
 
 @dp.message(Command("post"))
 async def cmd_post(message: Message):
@@ -596,9 +669,66 @@ async def post_from_queue():
     except Exception as e:
         logger.error(f"Error posting: {str(e)}")
 
+# Инициализация таблиц Supabase
+def init_supabase_tables():
+    try:
+        # Create tables if they don't exist
+        create_queries = [
+            """
+            CREATE TABLE IF NOT EXISTS posted_releases (
+                id TEXT PRIMARY KEY,
+                artist TEXT,
+                release TEXT,
+                date_posted TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS post_queue (
+                id SERIAL PRIMARY KEY,
+                artist TEXT,
+                release TEXT,
+                release_date TEXT,
+                release_type TEXT,
+                tracks_count INTEGER,
+                genres TEXT,
+                image_url TEXT,
+                listen_url TEXT,
+                platform TEXT,
+                created_at TIMESTAMP,
+                scheduled_time TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS bot_status (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+            """
+        ]
+        
+        for query in create_queries:
+            try:
+                supabase.rpc('run_sql', {'sql': query}).execute()
+            except Exception as e:
+                logger.info(f"Table already exists or error: {str(e)}")
+                
+    except Exception as e:
+        logger.error(f"Error initializing Supabase tables: {str(e)}")
+
 # Main function
 async def main():
+    # Initialize Supabase tables
+    init_supabase_tables()
+    
     # Start periodic tasks
+    async def periodic_check():
+        while True:
+            try:
+                await check_new_releases()
+            except Exception as e:
+                logger.error(f"Error in periodic check: {str(e)}")
+            await asyncio.sleep(CHECK_INTERVAL_HOURS * 3600)
+    
     async def periodic_post():
         while True:
             try:
@@ -612,6 +742,7 @@ async def main():
             await asyncio.sleep(interval_minutes * 60)
     
     # Start tasks
+    check_task = asyncio.create_task(periodic_check())
     post_task = asyncio.create_task(periodic_post())
     
     try:
@@ -624,8 +755,9 @@ async def main():
     finally:
         # Cleanup
         await bot.session.close()
+        check_task.cancel()
         post_task.cancel()
-        await asyncio.gather(post_task, return_exceptions=True)
+        await asyncio.gather(check_task, post_task, return_exceptions=True)
 
 if __name__ == '__main__':
     asyncio.run(main())
