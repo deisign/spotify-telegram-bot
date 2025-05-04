@@ -579,16 +579,42 @@ async def handle_message(message: Message):
 
     logger.info(f"Received message: {text}")
 
-    # Check if message contains Spotify URL
-    if 'spotify.com' in text:
-        logger.info("Found Spotify URL")
-        url_match = re.search(r'https?://open\.spotify\.com/(album|track)/([a-zA-Z0-9]+)', text)
-        if url_match:
-            item_type, item_id = url_match.groups()
-            logger.info(f"Matched {item_type} with ID: {item_id}")
-            
-            if item_type == 'album':
-                album_data = await spotify_api.get_album_details(item_id)
+    # Check if message contains Spotify URL (exact match for full album URL)
+    spotify_album_match = re.search(r'https?://open\.spotify\.com/album/([a-zA-Z0-9]+)', text)
+    if spotify_album_match:
+        logger.info("Found Spotify album URL")
+        album_id = spotify_album_match.group(1)
+        logger.info(f"Matched album ID: {album_id}")
+        
+        album_data = await spotify_api.get_album_details(album_id)
+        if album_data:
+            release_data = {
+                'artist': album_data['artists'][0]['name'],
+                'release': album_data['name'],
+                'release_date': album_data['release_date'],
+                'release_type': album_data['album_type'],
+                'tracks_count': album_data['total_tracks'],
+                'genres': ', '.join([f"#{g}" for g in album_data.get('genres', [])]),
+                'image_url': album_data['images'][0]['url'] if album_data['images'] else '',
+                'listen_url': album_data['external_urls']['spotify'],
+                'platform': 'spotify',
+                'created_at': datetime.now().isoformat()
+            }
+            SupabaseDB.add_to_queue(release_data)
+            await message.reply("✅ Added to posting queue!")
+        else:
+            await message.reply("❌ Failed to get album details.")
+    
+    # Check for Spotify track URL (convert to album)
+    elif 'spotify.com/track' in text:
+        track_match = re.search(r'https?://open\.spotify\.com/track/([a-zA-Z0-9]+)', text)
+        if track_match:
+            track_id = track_match.group(1)
+            track_data = await spotify_api.get_track_details(track_id)
+            if track_data:
+                # Get track's album info
+                album_id = track_data['album']['id']
+                album_data = await spotify_api.get_album_details(album_id)
                 if album_data:
                     release_data = {
                         'artist': album_data['artists'][0]['name'],
@@ -605,33 +631,7 @@ async def handle_message(message: Message):
                     SupabaseDB.add_to_queue(release_data)
                     await message.reply("✅ Added to posting queue!")
                 else:
-                    await message.reply("❌ Failed to get album details.")
-            elif item_type == 'track':
-                track_data = await spotify_api.get_track_details(item_id)
-                if track_data:
-                    # Get track's album info
-                    album_id = track_data['album']['id']
-                    album_data = await spotify_api.get_album_details(album_id)
-                    if album_data:
-                        release_data = {
-                            'artist': album_data['artists'][0]['name'],
-                            'release': album_data['name'],
-                            'release_date': album_data['release_date'],
-                            'release_type': album_data['album_type'],
-                            'tracks_count': album_data['total_tracks'],
-                            'genres': ', '.join([f"#{g}" for g in album_data.get('genres', [])]),
-                            'image_url': album_data['images'][0]['url'] if album_data['images'] else '',
-                            'listen_url': album_data['external_urls']['spotify'],
-                            'platform': 'spotify',
-                            'created_at': datetime.now().isoformat()
-                        }
-                        SupabaseDB.add_to_queue(release_data)
-                        await message.reply("✅ Added to posting queue!")
-                    else:
-                        await message.reply("❌ Failed to get track/album details.")
-        else:
-            logger.info("No match found for Spotify regex")
-            await message.reply("❌ Invalid Spotify link format")
+                    await message.reply("❌ Failed to get track/album details.")
 
     # Check if message contains Bandcamp URL
     elif 'bandcamp.com' in text:
@@ -663,8 +663,6 @@ async def handle_message(message: Message):
         else:
             logger.info("No match found for Bandcamp regex")
             await message.reply("❌ Invalid Bandcamp link format")
-    else:
-        logger.info("Message doesn't contain Spotify or Bandcamp URL")
 
 # Post from queue
 async def post_from_queue():
