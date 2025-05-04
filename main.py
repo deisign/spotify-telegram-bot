@@ -68,7 +68,10 @@ dp = Dispatcher()
 
 # Инициализация базы данных
 def init_db():
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DATABASE_PATH, detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
+    # Register datetime adapter
+    sqlite3.register_adapter(datetime, lambda val: val.isoformat())
+    sqlite3.register_converter("TIMESTAMP", lambda val: datetime.fromisoformat(val.decode()))
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS posted_releases (
@@ -283,8 +286,15 @@ class BandcampScraper:
 # Database operations
 class Database:
     @staticmethod
+    def get_connection():
+        conn = sqlite3.connect(DATABASE_PATH, detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
+        # Register datetime adapter
+        sqlite3.register_adapter(datetime, lambda val: val.isoformat())
+        sqlite3.register_converter("TIMESTAMP", lambda val: datetime.fromisoformat(val.decode()))
+        return conn
+    @staticmethod
     def add_to_queue(release_data):
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = Database.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             INSERT INTO post_queue (artist, release, release_date, release_type, tracks_count, genres, image_url, listen_url, platform, created_at)
@@ -306,7 +316,7 @@ class Database:
 
     @staticmethod
     def get_queue():
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = Database.get_connection()
         cursor = conn.cursor()
         cursor.execute('SELECT id, artist, release, release_date, release_type, tracks_count, genres, listen_url, platform FROM post_queue ORDER BY id')
         results = cursor.fetchall()
@@ -315,7 +325,7 @@ class Database:
 
     @staticmethod
     def remove_from_queue(queue_id):
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = Database.get_connection()
         cursor = conn.cursor()
         cursor.execute('DELETE FROM post_queue WHERE id = ?', (queue_id,))
         conn.commit()
@@ -323,7 +333,7 @@ class Database:
 
     @staticmethod
     def clear_queue():
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = Database.get_connection()
         cursor = conn.cursor()
         cursor.execute('DELETE FROM post_queue')
         conn.commit()
@@ -331,7 +341,7 @@ class Database:
 
     @staticmethod
     def mark_as_posted(release_id, artist, release):
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = Database.get_connection()
         cursor = conn.cursor()
         cursor.execute('''
             INSERT OR REPLACE INTO posted_releases (id, artist, release, date_posted)
@@ -342,7 +352,7 @@ class Database:
 
     @staticmethod
     def is_posted(release_id):
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = Database.get_connection()
         cursor = conn.cursor()
         cursor.execute('SELECT id FROM posted_releases WHERE id = ?', (release_id,))
         result = cursor.fetchone()
@@ -351,7 +361,7 @@ class Database:
 
     @staticmethod
     def update_status(key, value):
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = Database.get_connection()
         cursor = conn.cursor()
         cursor.execute('INSERT OR REPLACE INTO bot_status (key, value) VALUES (?, ?)', (key, value))
         conn.commit()
@@ -359,7 +369,7 @@ class Database:
 
     @staticmethod
     def get_status(key):
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = Database.get_connection()
         cursor = conn.cursor()
         cursor.execute('SELECT value FROM bot_status WHERE key = ?', (key,))
         result = cursor.fetchone()
