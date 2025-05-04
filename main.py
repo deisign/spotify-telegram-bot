@@ -2,7 +2,7 @@ import os
 import asyncio
 import aiohttp
 import aiogram
-from aiogram import Bot, Dispatcher, types, BaseMiddleware
+from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command, CommandStart
 from aiogram.types import FSInputFile, Message
 import requests
@@ -14,6 +14,31 @@ from bs4 import BeautifulSoup
 import time
 from urllib.parse import urlparse
 import re
+
+# Rate limiter class
+class RateLimiter:
+    def __init__(self, max_calls, period):
+        self.max_calls = max_calls
+        self.period = period
+        self.calls = []
+        self.lock = asyncio.Lock()
+    
+    async def acquire(self):
+        async with self.lock:
+            now = time.time()
+            # Remove old calls
+            self.calls = [call for call in self.calls if now - call < self.period]
+            
+            if len(self.calls) >= self.max_calls:
+                # Wait until the oldest call is outside the period
+                sleep_time = self.calls[0] + self.period - now
+                if sleep_time > 0:
+                    logger.info(f"Rate limit reached. Sleeping for {sleep_time:.2f} seconds...")
+                    await asyncio.sleep(sleep_time)
+                    return await self.acquire()
+            
+            self.calls.append(now)
+            return True
 
 # Настройка логирования
 logging.basicConfig(
@@ -40,7 +65,100 @@ DATABASE_PATH = 'bot_data.db'
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# Rest of the code goes here...
+# Spotify API
+class SpotifyAPI:
+    def __init__(self):
+        self.access_token = None
+        self.token_expires_at = None
+        self.rate_limiter = RateLimiter(max_calls=100, period=60)  # 100 calls per minute
+
+    async def get_access_token(self):
+        if self.access_token and datetime.now() < self.token_expires_at:
+            return self.access_token
+
+        await self.rate_limiter.acquire()
+        
+        url = "https://accounts.spotify.com/api/token"
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": SPOTIFY_REFRESH_TOKEN
+        }
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=data, auth=aiohttp.BasicAuth(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    self.access_token = data['access_token']
+                    self.token_expires_at = datetime.now() + timedelta(seconds=data['expires_in'])
+                    return self.access_token
+                else:
+                    logger.error(f"Failed to get Spotify access token: {await response.text()}")
+                    return None
+
+    async def get_track_details(self, track_id):
+        token = await self.get_access_token()
+        if not token:
+            return None
+
+        await self.rate_limiter.acquire()
+        
+        url = f"https://api.spotify.com/v1/tracks/{track_id}"
+        headers = {"Authorization": f"Bearer {token}"}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return data
+                elif response.status == 429:
+                    retry_after = int(response.headers.get('Retry-After', 60))
+                    logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
+                    await asyncio.sleep(retry_after)
+                    return await self.get_track_details(track_id)  # Retry
+                else:
+                    logger.error(f"Failed to get track details: {await response.text()}")
+                    return None
+
+    async def get_album_details(self, album_id):
+        token = await self.get_access_token()
+        if not token:
+            return None
+
+        await self.rate_limiter.acquire()
+        
+        url = f"https://api.spotify.com/v1/albums/{album_id}"
+        headers = {"Authorization": f"Bearer {token}"}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    # Get genres from artist
+                    artist_id = data['artists'][0]['id']
+                    await self.rate_limiter.acquire()
+                    artist_url = f"https://api.spotify.com/v1/artists/{artist_id}"
+                    async with session.get(artist_url, headers=headers) as artist_response:
+                        if artist_response.status == 200:
+                            artist_data = await artist_response.json()
+                            data['genres'] = artist_data.get('genres', [])
+                        elif artist_response.status == 429:
+                            retry_after = int(artist_response.headers.get('Retry-After', 60))
+                            logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
+                            await asyncio.sleep(retry_after)
+                    return data
+                elif response.status == 429:
+                    retry_after = int(response.headers.get('Retry-After', 60))
+                    logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
+                    await asyncio.sleep(retry_after)
+                    return await self.get_album_details(album_id)  # Retry
+                else:
+                    logger.error(f"Failed to get album details: {await response.text()}")
+                    return None
+
+# Create spotify_api instance
+spotify_api = SpotifyAPI()
+
 # Database operations
 class Database:
     @staticmethod
@@ -98,18 +216,7 @@ class Database:
         conn.commit()
         conn.close()
 
-    @staticmethod
-    def mark_as_posted(release_id, artist, release):
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO posted_releases (id, artist, release, date_posted)
-            VALUES (?, ?, ?, ?)
-        ''', (release_id, artist, release, datetime.now()))
-        conn.commit()
-        conn.close()
-
-# Handler for help and start commands
+# Commands
 @dp.message(CommandStart())
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
@@ -127,42 +234,6 @@ You can also send Spotify or Bandcamp links to add them to the queue.
 """
     await message.reply(help_text)
 
-# Handler for regular messages (including URLs)
-@dp.message()
-async def handle_message(message: Message):
-    text = message.text
-    if not text:
-        return
-
-    logger.info(f"Received message: {text}")
-
-    # Check if message contains Spotify URL
-    if 'spotify.com' in text:
-        logger.info("Found Spotify URL")
-        url_match = re.search(r'https?://open\.spotify\.com/(album|track)/([a-zA-Z0-9]+)', text)
-        if url_match:
-            item_type, item_id = url_match.groups()
-            logger.info(f"Matched {item_type} with ID: {item_id}")
-            
-            # Simple test - just add to queue with dummy data
-            release_data = {
-                'artist': 'Test Artist',
-                'release': 'Test Release',
-                'release_date': '2025-05-04',
-                'release_type': 'album',
-                'tracks_count': 10,
-                'genres': '#rock #pop',
-                'image_url': '',
-                'listen_url': text,
-                'platform': 'spotify'
-            }
-            Database.add_to_queue(release_data)
-            await message.reply("✅ Added to posting queue!")
-        else:
-            logger.info("No match found for Spotify regex")
-            await message.reply("❌ Invalid Spotify link format")
-
-# Simple command handlers
 @dp.message(Command("queue"))
 async def cmd_queue(message: Message):
     queue = Database.get_queue()
@@ -181,13 +252,66 @@ async def cmd_queue_clear(message: Message):
     Database.clear_queue()
     await message.reply("✅ Queue cleared.")
 
-# Main function
-async def main():
-    # Initialize database
-    init_db()
-    
-    # Start polling
-    await dp.start_polling(bot)
+# Handle all messages (including URLs)
+@dp.message()
+async def handle_message(message: Message):
+    text = message.text
+    if not text:
+        return
+
+    logger.info(f"Received message: {text}")
+
+    # Check if message contains Spotify URL
+    if 'spotify.com' in text:
+        logger.info("Found Spotify URL")
+        url_match = re.search(r'https?://open\.spotify\.com/(album|track)/([a-zA-Z0-9]+)', text)
+        if url_match:
+            item_type, item_id = url_match.groups()
+            logger.info(f"Matched {item_type} with ID: {item_id}")
+            
+            if item_type == 'album':
+                album_data = await spotify_api.get_album_details(item_id)
+                if album_data:
+                    release_data = {
+                        'artist': album_data['artists'][0]['name'],
+                        'release': album_data['name'],
+                        'release_date': album_data['release_date'],
+                        'release_type': album_data['album_type'],
+                        'tracks_count': album_data['total_tracks'],
+                        'genres': ', '.join([f"#{g}" for g in album_data.get('genres', [])]),
+                        'image_url': album_data['images'][0]['url'] if album_data['images'] else '',
+                        'listen_url': album_data['external_urls']['spotify'],
+                        'platform': 'spotify'
+                    }
+                    Database.add_to_queue(release_data)
+                    await message.reply("✅ Added to posting queue!")
+                else:
+                    await message.reply("❌ Failed to get album details.")
+            elif item_type == 'track':
+                track_data = await spotify_api.get_track_details(item_id)
+                if track_data:
+                    # Get track's album info
+                    album_id = track_data['album']['id']
+                    album_data = await spotify_api.get_album_details(album_id)
+                    if album_data:
+                        release_data = {
+                            'artist': album_data['artists'][0]['name'],
+                            'release': album_data['name'],
+                            'release_date': album_data['release_date'],
+                            'release_type': album_data['album_type'],
+                            'tracks_count': album_data['total_tracks'],
+                            'genres': ', '.join([f"#{g}" for g in album_data.get('genres', [])]),
+                            'image_url': album_data['images'][0]['url'] if album_data['images'] else '',
+                            'listen_url': album_data['external_urls']['spotify'],
+                            'platform': 'spotify'
+                        }
+                        Database.add_to_queue(release_data)
+                        await message.reply("✅ Added to posting queue!")
+                    else:
+                        await message.reply("❌ Failed to get track/album details.")
+        else:
+            logger.info("No match found for Spotify regex")
+            await message.reply("❌ Invalid Spotify link format")
 
 # Инициализация базы данных
 def init_db():
@@ -222,6 +346,14 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
+
+# Main function
+async def main():
+    # Initialize database
+    init_db()
+    
+    # Start polling
+    await dp.start_polling(bot)
 
 if __name__ == '__main__':
     asyncio.run(main())
