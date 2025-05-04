@@ -14,6 +14,32 @@ import schedule
 from bs4 import BeautifulSoup
 import time
 from urllib.parse import urlparse
+import re
+
+# Rate limiter class
+class RateLimiter:
+    def __init__(self, max_calls, period):
+        self.max_calls = max_calls
+        self.period = period
+        self.calls = []
+        self.lock = asyncio.Lock()
+    
+    async def acquire(self):
+        async with self.lock:
+            now = time.time()
+            # Remove old calls
+            self.calls = [call for call in self.calls if now - call < self.period]
+            
+            if len(self.calls) >= self.max_calls:
+                # Wait until the oldest call is outside the period
+                sleep_time = self.calls[0] + self.period - now
+                if sleep_time > 0:
+                    logger.info(f"Rate limit reached. Sleeping for {sleep_time:.2f} seconds...")
+                    await asyncio.sleep(sleep_time)
+                    return await self.acquire()
+            
+            self.calls.append(now)
+            return True
 
 # Настройка логирования
 logging.basicConfig(
@@ -82,11 +108,14 @@ class SpotifyAPI:
     def __init__(self):
         self.access_token = None
         self.token_expires_at = None
+        self.rate_limiter = RateLimiter(max_calls=100, period=60)  # 100 calls per minute
 
     async def get_access_token(self):
         if self.access_token and datetime.now() < self.token_expires_at:
             return self.access_token
 
+        await self.rate_limiter.acquire()
+        
         url = "https://accounts.spotify.com/api/token"
         data = {
             "grant_type": "refresh_token",
@@ -116,11 +145,18 @@ class SpotifyAPI:
 
         async with aiohttp.ClientSession() as session:
             while url:
+                await self.rate_limiter.acquire()
                 async with session.get(url, headers=headers) as response:
                     if response.status == 200:
                         data = await response.json()
                         artists.extend(data['artists']['items'])
                         url = data['artists']['next']
+                    elif response.status == 429:
+                        # Handle rate limit specifically
+                        retry_after = int(response.headers.get('Retry-After', 60))
+                        logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
+                        await asyncio.sleep(retry_after)
+                        continue
                     else:
                         logger.error(f"Failed to get followed artists: {await response.text()}")
                         break
@@ -132,6 +168,8 @@ class SpotifyAPI:
         if not token:
             return []
 
+        await self.rate_limiter.acquire()
+        
         url = f"https://api.spotify.com/v1/artists/{artist_id}/albums?include_groups=album,single&market=US&limit=5"
         headers = {"Authorization": f"Bearer {token}"}
 
@@ -140,6 +178,11 @@ class SpotifyAPI:
                 if response.status == 200:
                     data = await response.json()
                     return data['items']
+                elif response.status == 429:
+                    retry_after = int(response.headers.get('Retry-After', 60))
+                    logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
+                    await asyncio.sleep(retry_after)
+                    return await self.get_artist_new_releases(artist_id)  # Retry
                 else:
                     logger.error(f"Failed to get artist releases: {await response.text()}")
                     return []
@@ -149,6 +192,8 @@ class SpotifyAPI:
         if not token:
             return None
 
+        await self.rate_limiter.acquire()
+        
         url = f"https://api.spotify.com/v1/albums/{album_id}"
         headers = {"Authorization": f"Bearer {token}"}
 
@@ -158,12 +203,22 @@ class SpotifyAPI:
                     data = await response.json()
                     # Get genres from artist
                     artist_id = data['artists'][0]['id']
+                    await self.rate_limiter.acquire()
                     artist_url = f"https://api.spotify.com/v1/artists/{artist_id}"
                     async with session.get(artist_url, headers=headers) as artist_response:
                         if artist_response.status == 200:
                             artist_data = await artist_response.json()
                             data['genres'] = artist_data.get('genres', [])
+                        elif artist_response.status == 429:
+                            retry_after = int(artist_response.headers.get('Retry-After', 60))
+                            logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
+                            await asyncio.sleep(retry_after)
                     return data
+                elif response.status == 429:
+                    retry_after = int(response.headers.get('Retry-After', 60))
+                    logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
+                    await asyncio.sleep(retry_after)
+                    return await self.get_album_details(album_id)  # Retry
                 else:
                     logger.error(f"Failed to get album details: {await response.text()}")
                     return None
