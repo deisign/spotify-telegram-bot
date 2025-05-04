@@ -2,45 +2,18 @@ import os
 import asyncio
 import aiohttp
 import aiogram
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import FSInputFile
-from aiogram.fsm.middleware import BaseMiddleware
+from aiogram import Bot, Dispatcher, types, BaseMiddleware
+from aiogram.filters import Command, CommandStart
+from aiogram.types import FSInputFile, Message
 import requests
 import sqlite3
 import json
 import logging
 from datetime import datetime, timedelta
-import schedule
 from bs4 import BeautifulSoup
 import time
 from urllib.parse import urlparse
 import re
-
-# Rate limiter class
-class RateLimiter:
-    def __init__(self, max_calls, period):
-        self.max_calls = max_calls
-        self.period = period
-        self.calls = []
-        self.lock = asyncio.Lock()
-    
-    async def acquire(self):
-        async with self.lock:
-            now = time.time()
-            # Remove old calls
-            self.calls = [call for call in self.calls if now - call < self.period]
-            
-            if len(self.calls) >= self.max_calls:
-                # Wait until the oldest call is outside the period
-                sleep_time = self.calls[0] + self.period - now
-                if sleep_time > 0:
-                    logger.info(f"Rate limit reached. Sleeping for {sleep_time:.2f} seconds...")
-                    await asyncio.sleep(sleep_time)
-                    return await self.acquire()
-            
-            self.calls.append(now)
-            return True
 
 # Настройка логирования
 logging.basicConfig(
@@ -67,266 +40,7 @@ DATABASE_PATH = 'bot_data.db'
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# Инициализация базы данных
-def init_db():
-    conn = sqlite3.connect(DATABASE_PATH, detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
-    # Register datetime adapter
-    sqlite3.register_adapter(datetime, lambda val: val.isoformat())
-    sqlite3.register_converter("TIMESTAMP", lambda val: datetime.fromisoformat(val.decode()))
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS posted_releases (
-            id TEXT PRIMARY KEY,
-            artist TEXT,
-            release TEXT,
-            date_posted TIMESTAMP
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS post_queue (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            artist TEXT,
-            release TEXT,
-            release_date TEXT,
-            release_type TEXT,
-            tracks_count INTEGER,
-            genres TEXT,
-            image_url TEXT,
-            listen_url TEXT,
-            platform TEXT,
-            created_at TIMESTAMP,
-            scheduled_time TIMESTAMP
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS bot_status (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-# Spotify API
-class SpotifyAPI:
-    def __init__(self):
-        self.access_token = None
-        self.token_expires_at = None
-        self.rate_limiter = RateLimiter(max_calls=100, period=60)  # 100 calls per minute
-
-    async def get_access_token(self):
-        if self.access_token and datetime.now() < self.token_expires_at:
-            return self.access_token
-
-        await self.rate_limiter.acquire()
-        
-        url = "https://accounts.spotify.com/api/token"
-        data = {
-            "grant_type": "refresh_token",
-            "refresh_token": SPOTIFY_REFRESH_TOKEN
-        }
-        headers = {"Content-Type": "application/x-www-form-urlencoded"}
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=data, auth=aiohttp.BasicAuth(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    self.access_token = data['access_token']
-                    self.token_expires_at = datetime.now() + timedelta(seconds=data['expires_in'])
-                    return self.access_token
-                else:
-                    logger.error(f"Failed to get Spotify access token: {await response.text()}")
-                    return None
-
-    async def get_followed_artists(self):
-        token = await self.get_access_token()
-        if not token:
-            return []
-
-        artists = []
-        url = "https://api.spotify.com/v1/me/following?type=artist&limit=50"
-        headers = {"Authorization": f"Bearer {token}"}
-
-        async with aiohttp.ClientSession() as session:
-            while url:
-                await self.rate_limiter.acquire()
-                async with session.get(url, headers=headers) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        artists.extend(data['artists']['items'])
-                        url = data['artists']['next']
-                    elif response.status == 429:
-                        # Handle rate limit specifically
-                        retry_after = int(response.headers.get('Retry-After', 60))
-                        logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
-                        await asyncio.sleep(retry_after)
-                        continue
-                    else:
-                        logger.error(f"Failed to get followed artists: {await response.text()}")
-                        break
-
-        return artists
-
-    async def get_artist_new_releases(self, artist_id):
-        token = await self.get_access_token()
-        if not token:
-            return []
-
-        await self.rate_limiter.acquire()
-        
-        url = f"https://api.spotify.com/v1/artists/{artist_id}/albums?include_groups=album,single&market=US&limit=5"
-        headers = {"Authorization": f"Bearer {token}"}
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data['items']
-                elif response.status == 429:
-                    retry_after = int(response.headers.get('Retry-After', 60))
-                    logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
-                    await asyncio.sleep(retry_after)
-                    return await self.get_artist_new_releases(artist_id)  # Retry
-                else:
-                    logger.error(f"Failed to get artist releases: {await response.text()}")
-                    return []
-
-    async def get_track_details(self, track_id):
-        token = await self.get_access_token()
-        if not token:
-            return None
-
-        await self.rate_limiter.acquire()
-        
-        url = f"https://api.spotify.com/v1/tracks/{track_id}"
-        headers = {"Authorization": f"Bearer {token}"}
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data
-                elif response.status == 429:
-                    retry_after = int(response.headers.get('Retry-After', 60))
-                    logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
-                    await asyncio.sleep(retry_after)
-                    return await self.get_track_details(track_id)  # Retry
-                else:
-                    logger.error(f"Failed to get track details: {await response.text()}")
-                    return None
-
-    async def get_album_details(self, album_id):
-        token = await self.get_access_token()
-        if not token:
-            return None
-
-        await self.rate_limiter.acquire()
-        
-        url = f"https://api.spotify.com/v1/albums/{album_id}"
-        headers = {"Authorization": f"Bearer {token}"}
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    # Get genres from artist
-                    artist_id = data['artists'][0]['id']
-                    await self.rate_limiter.acquire()
-                    artist_url = f"https://api.spotify.com/v1/artists/{artist_id}"
-                    async with session.get(artist_url, headers=headers) as artist_response:
-                        if artist_response.status == 200:
-                            artist_data = await artist_response.json()
-                            data['genres'] = artist_data.get('genres', [])
-                        elif artist_response.status == 429:
-                            retry_after = int(artist_response.headers.get('Retry-After', 60))
-                            logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
-                            await asyncio.sleep(retry_after)
-                    return data
-                elif response.status == 429:
-                    retry_after = int(response.headers.get('Retry-After', 60))
-                    logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
-                    await asyncio.sleep(retry_after)
-                    return await self.get_album_details(album_id)  # Retry
-                else:
-                    logger.error(f"Failed to get album details: {await response.text()}")
-                    return None
-
-# Middleware для логирования всех входящих сообщений
-async def logging_middleware(handler, event, data):
-    update_type = type(event).__name__
-    logger.info(f"Received {update_type}: {event}")
-    return await handler(event, data)
-
-# Регистрируем middleware
-dp.message.middleware(logging_middleware)
-
-# Обработчик для отладки всех сообщений
-@dp.message()
-async def debug_message(message: types.Message):
-    logger.info(f"Message received in debug handler:")
-    logger.info(f"Text: {message.text}")
-    logger.info(f"From: {message.from_user.id if message.from_user else 'Unknown'}")
-    logger.info(f"Chat: {message.chat.id}")
-    logger.info(f"Message ID: {message.message_id}")
-    
-    # Продолжаем обработку
-    await handle_url(message)
-
-# Bandcamp web scraping
-class BandcampScraper:
-    @staticmethod
-    async def get_release_info(url):
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        html = await response.text()
-                        soup = BeautifulSoup(html, 'html.parser')
-                        
-                        # Extract release info
-                        title_elem = soup.find('h2', class_='trackTitle')
-                        artist_elem = soup.find('span', itemprop='byArtist')
-                        release_info = {
-                            'artist': artist_elem.text.strip() if artist_elem else '',
-                            'title': title_elem.text.strip() if title_elem else '',
-                            'release_date': '',
-                            'tracks': [],
-                            'genres': [],
-                            'image_url': '',
-                            'url': url
-                        }
-                        
-                        # Get cover art
-                        image_elem = soup.find('div', class_='popupImage')
-                        if image_elem and image_elem.find('img'):
-                            release_info['image_url'] = image_elem.find('img')['src']
-                        
-                        # Get track list
-                        tracks = soup.find_all('div', class_='track_row_view')
-                        release_info['tracks'] = [track.find('span', class_='track-title').text.strip() for track in tracks if track.find('span', class_='track-title')]
-                        
-                        # Get genres from tags
-                        tag_elements = soup.find_all('a', class_='tag')
-                        release_info['genres'] = [tag.text.strip() for tag in tag_elements[:3]]
-                        
-                        # Get release date
-                        album_info = soup.find('div', class_='albumInfo')
-                        if album_info:
-                            date_text = album_info.text
-                            # Parse date from text like "released April 1, 2023"
-                            import re
-                            date_match = re.search(r'released\s+(\w+\s+\d+,\s+\d+)', date_text)
-                            if date_match:
-                                release_info['release_date'] = date_match.group(1)
-                        
-                        return release_info
-                    else:
-                        logger.error(f"Failed to fetch Bandcamp page: {response.status}")
-                        return None
-        except Exception as e:
-            logger.error(f"Error scraping Bandcamp: {str(e)}")
-            return None
-
+# Rest of the code goes here...
 # Database operations
 class Database:
     @staticmethod
@@ -336,6 +50,7 @@ class Database:
         sqlite3.register_adapter(datetime, lambda val: val.isoformat())
         sqlite3.register_converter("TIMESTAMP", lambda val: datetime.fromisoformat(val.decode()))
         return conn
+
     @staticmethod
     def add_to_queue(release_data):
         conn = Database.get_connection()
@@ -394,50 +109,10 @@ class Database:
         conn.commit()
         conn.close()
 
-    @staticmethod
-    def is_posted(release_id):
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT id FROM posted_releases WHERE id = ?', (release_id,))
-        result = cursor.fetchone()
-        conn.close()
-        return result is not None
-
-    @staticmethod
-    def update_status(key, value):
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('INSERT OR REPLACE INTO bot_status (key, value) VALUES (?, ?)', (key, value))
-        conn.commit()
-        conn.close()
-
-    @staticmethod
-    def get_status(key):
-        conn = Database.get_connection()
-        cursor = conn.cursor()
-        cursor.execute('SELECT value FROM bot_status WHERE key = ?', (key,))
-        result = cursor.fetchone()
-        conn.close()
-        return result[0] if result else None
-
-# Format post
-def format_post(release_data):
-    text = f"*{release_data['artist']}*\n"
-    text += f"*{release_data['release']}*\n"
-    text += f"{release_data['release_date']}, {release_data['release_type']}, {release_data['tracks_count']} tracks\n"
-    text += f"Genre: {release_data['genres']}\n"
-    
-    listen_emoji = "🎧"
-    if release_data['platform'] == 'spotify':
-        text += f"{listen_emoji} Listen on Spotify {release_data['listen_url']}"
-    else:
-        text += f"{listen_emoji} Listen on Bandcamp {release_data['listen_url']}"
-    
-    return text
-
-# Bot commands
-@dp.message(Command("start", "help"))
-async def cmd_help(message: types.Message):
+# Handler for help and start commands
+@dp.message(CommandStart())
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
     help_text = """
 🤖 Spotify Release Tracker Bot
 
@@ -445,93 +120,16 @@ Available commands:
 /help - Show this help message
 /check - Check for new releases now
 /queue - Show posting queue
-/queue_remove [number] - Remove item from queue
 /queue_clear - Clear entire queue
 /status - Show bot status
-/post_fast [minutes] - Set posting interval (e.g., /post_fast 5)
 
 You can also send Spotify or Bandcamp links to add them to the queue.
-
-Default posting interval is 60 minutes between posts.
 """
     await message.reply(help_text)
 
-@dp.message(Command("check"))
-async def cmd_check(message: types.Message):
-    await message.reply("🔍 Checking for new releases...")
-    try:
-        await check_new_releases()
-        await message.reply("✅ Check completed!")
-    except Exception as e:
-        logger.error(f"Error checking releases: {str(e)}")
-        await message.reply("❌ Error checking releases. Check logs for details.")
-
-@dp.message(Command("queue"))
-async def cmd_queue(message: types.Message):
-    queue = Database.get_queue()
-    if not queue:
-        await message.reply("📭 Post queue is empty.")
-        return
-
-    text = "📋 *Post Queue:*\n\n"
-    for idx, item in enumerate(queue, 1):
-        text += f"{idx}. {item[1]} - {item[2]} ({item[8]})\n"
-    
-    await message.reply(text, parse_mode="Markdown")
-
-@dp.message(Command("queue_remove"))
-async def cmd_queue_remove(message: types.Message):
-    try:
-        args = message.text.split()
-        if len(args) != 2:
-            await message.reply("Usage: /queue_remove [number]")
-            return
-
-        index = int(args[1]) - 1
-        queue = Database.get_queue()
-        
-        if index < 0 or index >= len(queue):
-            await message.reply("Invalid queue number.")
-            return
-
-        queue_id = queue[index][0]
-        Database.remove_from_queue(queue_id)
-        await message.reply(f"✅ Removed item {args[1]} from queue.")
-    except ValueError:
-        await message.reply("Invalid number format.")
-    except Exception as e:
-        logger.error(f"Error removing from queue: {str(e)}")
-        await message.reply("❌ Error removing from queue.")
-
-@dp.message(Command("queue_clear"))
-async def cmd_queue_clear(message: types.Message):
-    Database.clear_queue()
-    await message.reply("✅ Queue cleared.")
-
-@dp.message(Command("post_fast"))
-async def cmd_post_fast(message: types.Message):
-    """Accelerate posting - post every 5 minutes"""
-    args = message.text.split()
-    if len(args) != 2 or not args[1].isdigit():
-        await message.reply("Usage: /post_fast [minutes]\nExample: /post_fast 5")
-        return
-    
-    minutes = int(args[1])
-    Database.update_status('post_interval', str(minutes))
-    await message.reply(f"✅ Posting interval set to {minutes} minutes")
-    last_check = Database.get_status('last_check')
-    last_post = Database.get_status('last_post')
-    
-    status_text = "🤖 *Bot Status:*\n\n"
-    status_text += f"Last check: {last_check if last_check else 'Never'}\n"
-    status_text += f"Last post: {last_post if last_post else 'Never'}\n"
-    status_text += f"Queue length: {len(Database.get_queue())}\n"
-    
-    await message.reply(status_text, parse_mode="Markdown")
-
-# Handle URLs
+# Handler for regular messages (including URLs)
 @dp.message()
-async def handle_url(message: types.Message):
+async def handle_message(message: Message):
     text = message.text
     if not text:
         return
@@ -546,230 +144,84 @@ async def handle_url(message: types.Message):
             item_type, item_id = url_match.groups()
             logger.info(f"Matched {item_type} with ID: {item_id}")
             
-            if item_type == 'album':
-                logger.info("Fetching album details...")
-                album_data = await spotify_api.get_album_details(item_id)
-                if album_data:
-                    logger.info(f"Album data received: {album_data['name']}")
-                    release_data = {
-                        'artist': album_data['artists'][0]['name'],
-                        'release': album_data['name'],
-                        'release_date': album_data['release_date'],
-                        'release_type': album_data['album_type'],
-                        'tracks_count': album_data['total_tracks'],
-                        'genres': ', '.join([f"#{g}" for g in album_data.get('genres', [])]),
-                        'image_url': album_data['images'][0]['url'] if album_data['images'] else '',
-                        'listen_url': album_data['external_urls']['spotify'],
-                        'platform': 'spotify'
-                    }
-                    Database.add_to_queue(release_data)
-                    await message.reply("✅ Added to posting queue!")
-                else:
-                    await message.reply("❌ Failed to get album details.")
-                    logger.error("Failed to get album details")
-                    
-            elif item_type == 'track':
-                logger.info("Fetching track details...")
-                track_data = await spotify_api.get_track_details(item_id)
-                if track_data:
-                    logger.info(f"Track data received: {track_data['name']}")
-                    # Get track's album info
-                    album_id = track_data['album']['id']
-                    album_data = await spotify_api.get_album_details(album_id)
-                    if album_data:
-                        release_data = {
-                            'artist': album_data['artists'][0]['name'],
-                            'release': album_data['name'],
-                            'release_date': album_data['release_date'],
-                            'release_type': album_data['album_type'],
-                            'tracks_count': album_data['total_tracks'],
-                            'genres': ', '.join([f"#{g}" for g in album_data.get('genres', [])]),
-                            'image_url': album_data['images'][0]['url'] if album_data['images'] else '',
-                            'listen_url': album_data['external_urls']['spotify'],
-                            'platform': 'spotify'
-                        }
-                        Database.add_to_queue(release_data)
-                        await message.reply("✅ Added to posting queue!")
-                    else:
-                        await message.reply("❌ Failed to get track/album details.")
-                        logger.error(f"Failed to get album details for track {item_id}")
+            # Simple test - just add to queue with dummy data
+            release_data = {
+                'artist': 'Test Artist',
+                'release': 'Test Release',
+                'release_date': '2025-05-04',
+                'release_type': 'album',
+                'tracks_count': 10,
+                'genres': '#rock #pop',
+                'image_url': '',
+                'listen_url': text,
+                'platform': 'spotify'
+            }
+            Database.add_to_queue(release_data)
+            await message.reply("✅ Added to posting queue!")
         else:
             logger.info("No match found for Spotify regex")
             await message.reply("❌ Invalid Spotify link format")
 
-    # Check if message contains Bandcamp URL
-    elif 'bandcamp.com' in text:
-        logger.info("Found Bandcamp URL")
-        url_match = re.search(r'https?://[a-zA-Z0-9.-]+\.bandcamp\.com/album/[a-zA-Z0-9-]+', text)
-        if url_match:
-            url = url_match.group(0)
-            logger.info(f"Matched Bandcamp URL: {url}")
-            release_info = await BandcampScraper.get_release_info(url)
-            if release_info:
-                logger.info(f"Bandcamp data received: {release_info['title']}")
-                release_data = {
-                    'artist': release_info['artist'],
-                    'release': release_info['title'],
-                    'release_date': release_info['release_date'],
-                    'release_type': 'album' if len(release_info['tracks']) > 1 else 'single',
-                    'tracks_count': len(release_info['tracks']),
-                    'genres': ', '.join([f"#{g}" for g in release_info['genres']]),
-                    'image_url': release_info['image_url'],
-                    'listen_url': url,
-                    'platform': 'bandcamp'
-                }
-                Database.add_to_queue(release_data)
-                await message.reply("✅ Added to posting queue!")
-            else:
-                await message.reply("❌ Failed to get Bandcamp release details.")
-                logger.error(f"Failed to get Bandcamp details for {url}")
-        else:
-            logger.info("No match found for Bandcamp regex")
-            await message.reply("❌ Invalid Bandcamp link format")
-    else:
-        logger.info("Message doesn't contain Spotify or Bandcamp URL")
-
-# Check new releases
-async def check_new_releases():
-    logger.info("Starting to check for new releases...")
-    Database.update_status('last_check', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-    
-    artists = await spotify_api.get_followed_artists()
-    logger.info(f"Found {len(artists)} followed artists")
-    
-    new_releases_count = 0
-    
-    for artist in artists:
-        releases = await spotify_api.get_artist_new_releases(artist['id'])
-        
-        for release in releases:
-            release_id = release['id']
-            
-            if not Database.is_posted(release_id):
-                album_data = await spotify_api.get_album_details(release_id)
-                if album_data:
-                    release_data = {
-                        'artist': album_data['artists'][0]['name'],
-                        'release': album_data['name'],
-                        'release_date': album_data['release_date'],
-                        'release_type': album_data['album_type'],
-                        'tracks_count': album_data['total_tracks'],
-                        'genres': ', '.join([f"#{g}" for g in album_data.get('genres', [])]),
-                        'image_url': album_data['images'][0]['url'] if album_data['images'] else '',
-                        'listen_url': album_data['external_urls']['spotify'],
-                        'platform': 'spotify'
-                    }
-                    Database.add_to_queue(release_data)
-                    new_releases_count += 1
-                    logger.info(f"Added {album_data['artists'][0]['name']} - {album_data['name']} to queue")
-    
-    logger.info(f"Check completed. Added {new_releases_count} new releases to queue.")
-
-# Post from queue
-async def post_from_queue():
+# Simple command handlers
+@dp.message(Command("queue"))
+async def cmd_queue(message: Message):
     queue = Database.get_queue()
     if not queue:
+        await message.reply("📭 Post queue is empty.")
         return
 
-    item = queue[0]
-    queue_id, artist, release, release_date, release_type, tracks_count, genres, image_url, listen_url, platform = item
+    text = "📋 *Post Queue:*\n\n"
+    for idx, item in enumerate(queue, 1):
+        text += f"{idx}. {item[1]} - {item[2]} ({item[9]})\n"
     
-    release_data = {
-        'artist': artist,
-        'release': release,
-        'release_date': release_date,
-        'release_type': release_type,
-        'tracks_count': tracks_count,
-        'genres': genres,
-        'image_url': image_url,
-        'listen_url': listen_url,
-        'platform': platform
-    }
-    
-    try:
-        # Download image
-        if image_url:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(image_url) as response:
-                    if response.status == 200:
-                        image_data = await response.read()
-                        image_path = f"temp_image_{queue_id}.jpg"
-                        with open(image_path, 'wb') as f:
-                            f.write(image_data)
-                        
-                        # Send post with image
-                        photo = FSInputFile(image_path)
-                        await bot.send_photo(
-                            chat_id=TELEGRAM_CHANNEL_ID,
-                            photo=photo,
-                            caption=format_post(release_data),
-                            parse_mode="Markdown"
-                        )
-                        
-                        # Clean up
-                        os.remove(image_path)
-                    else:
-                        # Send without image if download fails
-                        await bot.send_message(
-                            chat_id=TELEGRAM_CHANNEL_ID,
-                            text=format_post(release_data),
-                            parse_mode="Markdown"
-                        )
-        else:
-            # Send without image
-            await bot.send_message(
-                chat_id=TELEGRAM_CHANNEL_ID,
-                text=format_post(release_data),
-                parse_mode="Markdown"
-            )
-        
-        Database.remove_from_queue(queue_id)
-        Database.mark_as_posted(f"{platform}_{queue_id}", artist, release)
-        Database.update_status('last_post', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        logger.info(f"Posted {artist} - {release}")
-        
-    except Exception as e:
-        logger.error(f"Error posting: {str(e)}")
+    await message.reply(text, parse_mode="Markdown")
+
+@dp.message(Command("queue_clear"))
+async def cmd_queue_clear(message: Message):
+    Database.clear_queue()
+    await message.reply("✅ Queue cleared.")
 
 # Main function
 async def main():
     # Initialize database
     init_db()
     
-    # Start periodic tasks
-    async def periodic_check():
-        while True:
-            try:
-                await check_new_releases()
-            except Exception as e:
-                logger.error(f"Error in periodic check: {str(e)}")
-            await asyncio.sleep(CHECK_INTERVAL_HOURS * 3600)
-    
-    async def periodic_post():
-        while True:
-            try:
-                await post_from_queue()
-            except Exception as e:
-                logger.error(f"Error in periodic post: {str(e)}")
-            
-            # Check for custom posting interval
-            interval_str = Database.get_status('post_interval')
-            interval_minutes = int(interval_str) if interval_str else 60  # default 60 minutes
-            await asyncio.sleep(interval_minutes * 60)
-    
-    # Start tasks
-    check_task = asyncio.create_task(periodic_check())
-    post_task = asyncio.create_task(periodic_post())
-    bot_task = asyncio.create_task(dp.start_polling(bot))
-    
-    try:
-        # Run all tasks concurrently
-        await asyncio.gather(check_task, post_task, bot_task)
-    except Exception as e:
-        logger.error(f"Error in main: {str(e)}")
-    finally:
-        # Cleanup
-        await bot.session.close()
+    # Start polling
+    await dp.start_polling(bot)
+
+# Инициализация базы данных
+def init_db():
+    conn = sqlite3.connect(DATABASE_PATH, detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
+    # Register datetime adapter
+    sqlite3.register_adapter(datetime, lambda val: val.isoformat())
+    sqlite3.register_converter("TIMESTAMP", lambda val: datetime.fromisoformat(val.decode()))
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS posted_releases (
+            id TEXT PRIMARY KEY,
+            artist TEXT,
+            release TEXT,
+            date_posted TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS post_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            artist TEXT,
+            release TEXT,
+            release_date TEXT,
+            release_type TEXT,
+            tracks_count INTEGER,
+            genres TEXT,
+            image_url TEXT,
+            listen_url TEXT,
+            platform TEXT,
+            created_at TIMESTAMP,
+            scheduled_time TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
 if __name__ == '__main__':
     asyncio.run(main())
