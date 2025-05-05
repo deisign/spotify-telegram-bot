@@ -48,12 +48,6 @@ if not auth_manager.get_cached_token():
 
 sp = spotipy.Spotify(auth_manager=auth_manager)
 
-# Patterns for Spotify URLs
-SPOTIFY_URL_PATTERNS = [
-    r'https://open\.spotify\.com/album/([a-zA-Z0-9]+)',
-    r'spotify:album:([a-zA-Z0-9]+)'
-]
-
 # Queue
 posting_queue = []
 
@@ -71,8 +65,10 @@ async def load_queue():
 async def handle_message(message: types.Message):
     if not message.text:
         return
-        
-    # Check for queue command
+    
+    logger.info(f"Received: {message.text}")
+    
+    # Handle /queue command
     if message.text == "/queue":
         if not posting_queue:
             await message.answer("📭 Post queue is empty.")
@@ -81,23 +77,19 @@ async def handle_message(message: types.Message):
         queue_text = "📦 Post Queue:\n\n"
         for i, item in enumerate(posting_queue, 1):
             item_id = item.get('item_id', 'unknown')
-            item_type = item.get('item_type', 'unknown')
             
-            if item_type == 'album':
-                try:
-                    album = sp.album(item_id)
-                    artist_name = ', '.join([artist['name'] for artist in album['artists']])
-                    album_name = album['name']
-                    queue_text += f"{i}. {artist_name} - {album_name}\n"
-                except:
-                    queue_text += f"{i}. album ID: {item_id}\n"
-            else:
-                queue_text += f"{i}. {item_type} ID: {item_id}\n"
+            try:
+                album = sp.album(item_id)
+                artist_name = ', '.join([artist['name'] for artist in album['artists']])
+                album_name = album['name']
+                queue_text += f"{i}. {artist_name} - {album_name}\n"
+            except:
+                queue_text += f"{i}. album ID: {item_id}\n"
         
         await message.answer(queue_text)
         return
     
-    # Check for post command
+    # Handle /post command
     if message.text == "/post":
         if not posting_queue:
             await message.answer("📭 Post queue is empty.")
@@ -105,58 +97,78 @@ async def handle_message(message: types.Message):
         
         item = posting_queue[0]
         try:
-            if item.get('item_type') == 'album':
-                album = sp.album(item['item_id'])
-                
-                message_text = f"🎵 New Release Alert!\n\n" \
-                              f"🎤 Artist: {', '.join([artist['name'] for artist in album['artists']])}\n" \
-                              f"💿 Album: {album['name']}\n" \
-                              f"📅 Release Date: {album['release_date']}\n" \
-                              f"🔢 Tracks: {album['total_tracks']}\n\n" \
-                              f"🔗 Listen on Spotify: https://open.spotify.com/album/{item['item_id']}"
-                
-                await bot.send_message(CHANNEL_ID, message_text)
-                
-                # Remove from queue
-                posting_queue.pop(0)
-                
-                # Update database
-                supabase.table('post_queue').update({
-                    'posted': True,
-                    'posted_at': datetime.now().isoformat()
-                }).eq('item_id', item['item_id']).eq('item_type', item['item_type']).execute()
-                
-                await message.answer(f"✅ Posted album {item['item_id']}")
+            album = sp.album(item['item_id'])
+            
+            message_text = f"🎵 New Release Alert!\n\n" \
+                          f"🎤 Artist: {', '.join([artist['name'] for artist in album['artists']])}\n" \
+                          f"💿 Album: {album['name']}\n" \
+                          f"📅 Release Date: {album['release_date']}\n" \
+                          f"🔢 Tracks: {album['total_tracks']}\n\n" \
+                          f"🔗 Listen on Spotify: https://open.spotify.com/album/{item['item_id']}"
+            
+            await bot.send_message(CHANNEL_ID, message_text, parse_mode=None)
+            
+            # Remove from queue
+            posting_queue.pop(0)
+            
+            # Update database
+            supabase.table('post_queue').update({
+                'posted': True,
+                'posted_at': datetime.now().isoformat()
+            }).eq('item_id', item['item_id']).eq('item_type', 'album').execute()
+            
+            artist_name = ', '.join([artist['name'] for artist in album['artists']])
+            await message.answer(f"✅ Posted album {artist_name} - {album['name']}")
         except Exception as e:
             logger.error(f"Error posting: {e}")
             await message.answer(f"❌ Error posting: {e}")
         return
     
-    # Check for Spotify URLs
-    for pattern in SPOTIFY_URL_PATTERNS:
-        match = re.search(pattern, message.text)
-        if match:
-            album_id = match.group(1)
-            
-            new_item = {
+    # Handle Spotify URLs
+    spotify_match = re.search(r'https://open\.spotify\.com/album/([a-zA-Z0-9]+)', message.text)
+    if spotify_match:
+        album_id = spotify_match.group(1)
+        logger.info(f"Found album ID: {album_id}")
+        
+        # Check if already in queue
+        already_exists = any(item.get('item_id') == album_id for item in posting_queue)
+        
+        if already_exists:
+            await message.answer(f"ℹ️ Album already in queue")
+            return
+        
+        new_item = {
+            'item_id': album_id,
+            'item_type': 'album',
+            'added_at': datetime.now().isoformat()
+        }
+        
+        posting_queue.append(new_item)
+        
+        try:
+            supabase.table('post_queue').insert({
                 'item_id': album_id,
                 'item_type': 'album',
-                'added_at': datetime.now().isoformat()
-            }
-            
-            posting_queue.append(new_item)
-            
-            try:
-                supabase.table('post_queue').insert({
-                    'item_id': album_id,
-                    'item_type': 'album',
-                    'added_at': new_item['added_at']
-                }).execute()
-                await message.answer(f"✅ Added album to queue")
-            except Exception as e:
-                posting_queue.remove(new_item)
-                await message.answer(f"ℹ️ Album already in queue")
-            return
+                'added_at': new_item['added_at']
+            }).execute()
+            await message.answer(f"✅ Added album to queue")
+        except Exception as e:
+            posting_queue.remove(new_item)
+            await message.answer(f"ℹ️ Album already in queue")
+        return
+
+@dp.message(Command("clear"))
+async def cmd_clear(message: types.Message):
+    global posting_queue
+    posting_queue = []
+    try:
+        supabase.table('post_queue').update({
+            'posted': True,
+            'posted_at': datetime.now().isoformat()
+        }).eq('posted', False).execute()
+        await message.answer("🗑️ Queue cleared!")
+    except Exception as e:
+        await message.answer("❌ Error clearing queue")
 
 async def main():
     await load_queue()
