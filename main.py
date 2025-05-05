@@ -61,7 +61,21 @@ async def load_queue():
         logger.error(f"Error loading queue: {e}")
         posting_queue = []
 
-# ПРАВИЛЬНЫЕ КОМАНДЫ
+# КОМАНДЫ ДОЛЖНЫ БЫТЬ ПЕРВЫМИ
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    help_text = """🎵 Spotify Release Tracker Bot
+
+Available commands:
+/help - Show this help message
+/queue - Show posting queue
+/post - Post next item in queue manually
+/clear - Clear posting queue
+
+You can also send Spotify links to add them to the queue."""
+    
+    await message.answer(help_text)
+
 @dp.message(Command("queue"))
 async def cmd_queue(message: types.Message):
     if not posting_queue:
@@ -129,23 +143,9 @@ async def cmd_clear(message: types.Message):
     except Exception as e:
         await message.answer("❌ Error clearing queue")
 
-@dp.message(Command("help"))
-async def cmd_help(message: types.Message):
-    help_text = """🎵 Spotify Release Tracker Bot
-
-Available commands:
-/help - Show this help message
-/queue - Show posting queue
-/post - Post next item in queue manually
-/clear - Clear posting queue
-
-You can also send Spotify links to add them to the queue."""
-    
-    await message.answer(help_text)
-
-# ОБРАБОТЧИК ССЫЛОК
+# ОБРАБОТЧИК ССЫЛОК ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ
 @dp.message()
-async def handle_message(message: types.Message):
+async def handle_spotify_link(message: types.Message):
     if not message.text:
         return
     
