@@ -1,479 +1,201 @@
-import os
 import asyncio
-import aiohttp
+import logging
+import os
+import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Dict, List, Optional, Set
+
+import schedule
+import spotipy
 import aiogram
 from aiogram import Bot, Dispatcher, types
+from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
-from aiogram.types import FSInputFile, Message
-import requests
-import json
-import logging
-from datetime import datetime, timedelta
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from bs4 import BeautifulSoup
-import time
-from urllib.parse import urlparse
-import re
-from supabase import create_client, Client
+from spotipy.oauth2 import SpotifyClientCredentials
 
-# Настройка логирования
+# Supabase setup
+from supabase import create_client, Client
+from dotenv import load_dotenv
+
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Переменные окружения
-SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
-SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
-SPOTIFY_REFRESH_TOKEN = os.environ.get('SPOTIFY_REFRESH_TOKEN')
-SPOTIFY_REDIRECT_URI = os.environ.get('SPOTIFY_REDIRECT_URI')
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
-TELEGRAM_CHANNEL_ID = os.environ.get('TELEGRAM_CHANNEL_ID')
-CHECK_INTERVAL_HOURS = int(os.environ.get('CHECK_INTERVAL_HOURS', 3))
-SUPABASE_URL = os.environ.get('SUPABASE_URL')
-SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
+# Load environment variables
+load_dotenv()
 
-# Инициализация Supabase
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Spotify credentials
+client_credentials_manager = SpotifyClientCredentials(
+    client_id=os.getenv("SPOTIFY_CLIENT_ID"),
+    client_secret=os.getenv("SPOTIFY_CLIENT_SECRET")
+)
+sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
 
-# Rate limiter class
-class RateLimiter:
-    def __init__(self, max_calls, period):
-        self.max_calls = max_calls
-        self.period = period
-        self.calls = []
-        self.lock = asyncio.Lock()
-    
-    async def acquire(self):
-        async with self.lock:
-            now = time.time()
-            # Remove old calls
-            self.calls = [call for call in self.calls if now - call < self.period]
-            
-            if len(self.calls) >= self.max_calls:
-                # Wait until the oldest call is outside the period
-                sleep_time = self.calls[0] + self.period - now
-                if sleep_time > 0:
-                    logger.info(f"Rate limit reached. Sleeping for {sleep_time:.2f} seconds...")
-                    await asyncio.sleep(sleep_time)
-                    return await self.acquire()
-            
-            self.calls.append(now)
-            return True
+# Telegram Bot configuration
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+bot = Bot(token=BOT_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
-# Spotify API
-class SpotifyAPI:
-    def __init__(self):
-        self.access_token = None
-        self.token_expires_at = None
-        self.rate_limiter = RateLimiter(max_calls=100, period=60)  # 100 calls per minute
+# Supabase configuration
+url: str = os.getenv("SUPABASE_URL")
+key: str = os.getenv("SUPABASE_KEY")
+supabase: Client = create_client(url, key)
 
-    async def get_access_token(self):
-        if self.access_token and datetime.now() < self.token_expires_at:
-            return self.access_token
+# Constants
+SPOTIFY_URL_PATTERNS = [
+    r'https://open\.spotify\.com/album/([a-zA-Z0-9]+)',
+    r'spotify:album:([a-zA-Z0-9]+)'
+]
 
-        await self.rate_limiter.acquire()
-        
-        url = "https://accounts.spotify.com/api/token"
-        data = {
-            "grant_type": "refresh_token",
-            "refresh_token": SPOTIFY_REFRESH_TOKEN
-        }
-        headers = {"Content-Type": "application/x-www-form-urlencoded"}
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=data, auth=aiohttp.BasicAuth(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET)) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    self.access_token = data['access_token']
-                    self.token_expires_at = datetime.now() + timedelta(seconds=data['expires_in'])
-                    return self.access_token
-                else:
-                    logger.error(f"Failed to get Spotify access token: {await response.text()}")
-                    return None
-
-    async def get_track_details(self, track_id):
-        token = await self.get_access_token()
-        if not token:
-            return None
-
-        await self.rate_limiter.acquire()
-        
-        url = f"https://api.spotify.com/v1/tracks/{track_id}"
-        headers = {"Authorization": f"Bearer {token}"}
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data
-                elif response.status == 429:
-                    retry_after = int(response.headers.get('Retry-After', 60))
-                    logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
-                    await asyncio.sleep(retry_after)
-                    return await self.get_track_details(track_id)  # Retry
-                else:
-                    logger.error(f"Failed to get track details: {await response.text()}")
-                    return None
-
-    async def get_album_details(self, album_id):
-        token = await self.get_access_token()
-        if not token:
-            return None
-
-        await self.rate_limiter.acquire()
-        
-        url = f"https://api.spotify.com/v1/albums/{album_id}"
-        headers = {"Authorization": f"Bearer {token}"}
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    # Get genres from artist
-                    artist_id = data['artists'][0]['id']
-                    await self.rate_limiter.acquire()
-                    artist_url = f"https://api.spotify.com/v1/artists/{artist_id}"
-                    async with session.get(artist_url, headers=headers) as artist_response:
-                        if artist_response.status == 200:
-                            artist_data = await artist_response.json()
-                            data['genres'] = artist_data.get('genres', [])
-                        elif artist_response.status == 429:
-                            retry_after = int(artist_response.headers.get('Retry-After', 60))
-                            logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
-                            await asyncio.sleep(retry_after)
-                    return data
-                elif response.status == 429:
-                    retry_after = int(response.headers.get('Retry-After', 60))
-                    logger.warning(f"Rate limited. Waiting {retry_after} seconds...")
-                    await asyncio.sleep(retry_after)
-                    return await self.get_album_details(album_id)  # Retry
-                else:
-                    logger.error(f"Failed to get album details: {await response.text()}")
-                    return None
-
-# Инициализация бота
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
-dp = Dispatcher()
-
-# Create spotify_api instance
-spotify_api = SpotifyAPI()
-
-# Bandcamp web scraping
-class BandcampScraper:
-    @staticmethod
-    async def get_release_info(url):
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        html = await response.text()
-                        soup = BeautifulSoup(html, 'html.parser')
-                        
-                        # Extract release title (not artist) from h2 element
-                        title_elem = soup.find('h2', class_='trackTitle')
-                        raw_title = title_elem.text.strip() if title_elem else ''
-                        
-                        # Extract artist and actual title from pattern "Title, by Artist"
-                        artist_name = ''
-                        release_title = raw_title
-                        
-                        if ', by ' in raw_title:
-                            parts = raw_title.split(', by ')
-                            if len(parts) == 2:
-                                release_title = parts[0].strip()
-                                artist_name = parts[1].strip()
-                        
-                        release_info = {
-                            'artist': artist_name,
-                            'title': release_title,
-                            'release_date': '',
-                            'tracks': [],
-                            'genres': [],
-                            'image_url': '',
-                            'url': url
-                        }
-                        
-                        # Get cover art
-                        image_elem = soup.find('div', id='tralbumArt')
-                        if image_elem and image_elem.find('img'):
-                            release_info['image_url'] = image_elem.find('img')['src']
-                        
-                        # Get track list
-                        track_table = soup.find('table', id='track_table')
-                        if track_table:
-                            track_rows = track_table.find_all('tr', class_='track_row_view')
-                            for track in track_rows:
-                                title_span = track.find('span', class_='track-title')
-                                if title_span:
-                                    release_info['tracks'].append(title_span.text.strip())
-                        
-                        # Get genres from tags
-                        tag_elements = soup.find_all('a', class_='tag')
-                        release_info['genres'] = [tag.text.strip() for tag in tag_elements[:3]]
-                        
-                        # Get release date
-                        release_date_elem = soup.find('div', class_='tralbum-credits')
-                        if release_date_elem:
-                            date_text = release_date_elem.text
-                            # Parse date from text like "released April 1, 2023"
-                            import re
-                            date_match = re.search(r'released\s+(\w+\s+\d+,\s+\d+)', date_text)
-                            if date_match:
-                                release_info['release_date'] = date_match.group(1)
-                        
-                        # Log the found information for debugging
-                        logger.info(f"Found artist: '{release_info['artist']}'")
-                        logger.info(f"Found title: '{release_info['title']}'")
-                        logger.info(f"Raw title: '{raw_title}'")
-                        
-                        return release_info
-                    else:
-                        logger.error(f"Failed to fetch Bandcamp page: {response.status}")
-                        return None
-        except Exception as e:
-            logger.error(f"Error scraping Bandcamp: {str(e)}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return None
-
-# Database operations with Supabase
-class SupabaseDB:
-    @staticmethod
-    def add_to_queue(release_data):
-        try:
-            # Ensure artist is set before adding to queue
-            if not release_data.get('artist') and release_data.get('platform') == 'bandcamp':
-                # Extract from URL as fallback
-                url = release_data.get('listen_url', '')
-                if 'bandcamp.com' in url:
-                    artist_from_url = url.split('//')[1].split('.')[0]
-                    release_data['artist'] = artist_from_url.replace('-', ' ').title()
-                    
-            data = supabase.table('post_queue').insert(release_data).execute()
-            logger.info(f"Added to queue: {data}")
-            return True
-        except Exception as e:
-            logger.error(f"Error adding to queue: {str(e)}")
-            return False
-
-    @staticmethod
-    def get_queue():
-        try:
-            data = supabase.table('post_queue').select("*").order('id').execute()
-            return data.data if data.data else []
-        except Exception as e:
-            logger.error(f"Error getting queue: {str(e)}")
-            return []
-
-    @staticmethod
-    def remove_from_queue(queue_id):
-        try:
-            data = supabase.table('post_queue').delete().eq('id', queue_id).execute()
-            logger.info(f"Removed from queue: {data}")
-            return True
-        except Exception as e:
-            logger.error(f"Error removing from queue: {str(e)}")
-            return False
-
-    @staticmethod
-    def clear_queue():
-        try:
-            data = supabase.table('post_queue').delete().neq('id', 0).execute()
-            logger.info(f"Cleared queue: {data}")
-            return True
-        except Exception as e:
-            logger.error(f"Error clearing queue: {str(e)}")
-            return False
-
-    @staticmethod
-    def mark_as_posted(release_id, artist, release):
-        try:
-            data = supabase.table('posted_releases').insert({
-                'id': release_id,
-                'artist': artist,
-                'release': release,
-                'date_posted': datetime.now().isoformat()
-            }).execute()
-            logger.info(f"Marked as posted: {data}")
-            return True
-        except Exception as e:
-            logger.error(f"Error marking as posted: {str(e)}")
-            return False
-
-    @staticmethod
-    def is_posted(release_id):
-        try:
-            data = supabase.table('posted_releases').select("*").eq('id', release_id).execute()
-            return bool(data.data)
-        except Exception as e:
-            logger.error(f"Error checking if posted: {str(e)}")
-            return False
-
-    @staticmethod
-    def update_status(key, value):
-        try:
-            # Check if key exists
-            existing = supabase.table('bot_status').select("*").eq('key', key).execute()
-            if existing.data:
-                # Update
-                data = supabase.table('bot_status').update({'value': value}).eq('key', key).execute()
-            else:
-                # Insert
-                data = supabase.table('bot_status').insert({'key': key, 'value': value}).execute()
-            logger.info(f"Updated status: {data}")
-            return True
-        except Exception as e:
-            logger.error(f"Error updating status: {str(e)}")
-            return False
-
-    @staticmethod
-    def get_status(key):
-        try:
-            data = supabase.table('bot_status').select("value").eq('key', key).execute()
-            return data.data[0]['value'] if data.data else None
-        except Exception as e:
-            logger.error(f"Error getting status: {str(e)}")
-            return None
-
-# Escape special characters for MarkdownV2
-def escape_markdown_v2(text):
-    if not text:
-        return ""
-    # Escape special characters for MarkdownV2
-    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-    for char in special_chars:
-        text = text.replace(char, f'\\{char}')
-    return text
-
-# Format post
-def format_post(release_data):
-    # Escape all text content
-    artist = escape_markdown_v2(release_data['artist'])
-    release = escape_markdown_v2(release_data['release'])
-    release_date = escape_markdown_v2(release_data['release_date'])
-    release_type = escape_markdown_v2(release_data['release_type'])
-    genres = escape_markdown_v2(release_data['genres'])
-    
-    text = f"*{artist}*\n"
-    text += f"*{release}*\n"
-    text += f"{release_date}, {release_type}, {release_data['tracks_count']} tracks\n"
-    text += f"Genre: {genres}\n"
-    
-    listen_emoji = "🎧"
-    if release_data['platform'] == 'spotify':
-        text += f"{listen_emoji} Listen on [Spotify]({release_data['listen_url']})"
-    else:
-        text += f"{listen_emoji} Listen on [Bandcamp]({release_data['listen_url']})"
-    
-    return text
-
-# Check if release is recent (within last N days)
-def is_recent_release(release_date_str, days_threshold=3):  # Changed default to 3 days
+# Database initialization
+async def init_db():
+    """Initialize database tables"""
     try:
-        # Parse different date formats (YYYY, YYYY-MM, YYYY-MM-DD)
-        if len(release_date_str) == 4:  # Year only
-            release_date = datetime.strptime(release_date_str, '%Y')
-        elif len(release_date_str) == 7:  # Year-Month
-            release_date = datetime.strptime(release_date_str, '%Y-%m')
-        else:  # Full date
-            release_date = datetime.strptime(release_date_str, '%Y-%m-%d')
+        # Create bot_status table
+        await supabase.rpc('run_sql', {'sql': '''
+            CREATE TABLE IF NOT EXISTS bot_status (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+        '''}).execute()
         
-        now = datetime.now()
-        days_diff = (now - release_date).days
-        return days_diff <= days_threshold
-    except:
-        # If parsing fails, consider it not recent
+        # Create followed_artists table
+        await supabase.rpc('run_sql', {'sql': '''
+            CREATE TABLE IF NOT EXISTS followed_artists (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                last_release_date TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        '''}).execute()
+        
+        # Create post_queue table
+        await supabase.rpc('run_sql', {'sql': '''
+            CREATE TABLE IF NOT EXISTS post_queue (
+                id SERIAL PRIMARY KEY,
+                item_id TEXT,
+                item_type TEXT,
+                added_at TIMESTAMPTZ DEFAULT NOW(),
+                posted BOOLEAN DEFAULT FALSE,
+                posted_at TIMESTAMPTZ
+            );
+        '''}).execute()
+        
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Table already exists or error: {e}")
+
+# Helper functions
+async def get_bot_status(key: str, default=None):
+    """Get bot status value"""
+    try:
+        result = supabase.table('bot_status').select('value').eq('key', key).execute()
+        if result.data:
+            return result.data[0]['value']
+        return default
+    except Exception as e:
+        logger.error(f"Error getting bot status: {e}")
+        return default
+
+async def set_bot_status(key: str, value: str):
+    """Set bot status value"""
+    try:
+        supabase.table('bot_status').upsert({
+            'key': key,
+            'value': value
+        }).execute()
+    except Exception as e:
+        logger.error(f"Error setting bot status: {e}")
+
+# Global variables
+posting_queue: List[Dict] = []
+check_task = None
+post_task = None
+
+async def load_queue():
+    """Load posting queue from database"""
+    global posting_queue
+    try:
+        result = supabase.table('post_queue').select('*').eq('posted', False).order('id').execute()
+        posting_queue = result.data if result.data else []
+        logger.info(f"Loaded {len(posting_queue)} items from queue")
+    except Exception as e:
+        logger.error(f"Error loading queue: {e}")
+
+async def save_queue():
+    """Save queue to database"""
+    try:
+        for item in posting_queue:
+            if 'id' not in item:  # New item
+                supabase.table('post_queue').insert({
+                    'item_id': item['item_id'],
+                    'item_type': item['item_type'],
+                    'added_at': item.get('added_at', datetime.now().isoformat())
+                }).execute()
+    except Exception as e:
+        logger.error(f"Error saving queue: {e}")
+
+async def add_to_queue(item_id: str, item_type: str):
+    """Add item to queue"""
+    global posting_queue
+    
+    # Check if already in queue
+    for item in posting_queue:
+        if item['item_id'] == item_id and item['item_type'] == item_type:
+            return False
+    
+    new_item = {
+        'item_id': item_id,
+        'item_type': item_type,
+        'added_at': datetime.now().isoformat()
+    }
+    
+    posting_queue.append(new_item)
+    
+    # Save to database
+    try:
+        supabase.table('post_queue').insert({
+            'item_id': item_id,
+            'item_type': item_type,
+            'added_at': new_item['added_at']
+        }).execute()
+        logger.info(f"Added {item_type} {item_id} to queue")
+        return True
+    except Exception as e:
+        logger.error(f"Error adding to queue: {e}")
+        # Remove from memory if database insert failed
+        posting_queue.remove(new_item)
         return False
 
-# Spotify check for new releases
-async def check_new_releases():
-    logger.info("Starting to check for new releases...")
-    SupabaseDB.update_status('last_check', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+async def remove_from_queue(item_id: str, item_type: str):
+    """Remove item from queue"""
+    global posting_queue
     
-    # Get followed artists
-    token = await spotify_api.get_access_token()
-    if not token:
-        logger.error("Failed to get access token")
-        return
-    
-    url = "https://api.spotify.com/v1/me/following?type=artist&limit=50"
-    headers = {"Authorization": f"Bearer {token}"}
+    posting_queue = [item for item in posting_queue 
+                    if not (item['item_id'] == item_id and item['item_type'] == item_type)]
     
     try:
-        artists = []
-        async with aiohttp.ClientSession() as session:
-            while url:
-                await spotify_api.rate_limiter.acquire()
-                async with session.get(url, headers=headers) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        artists.extend(data['artists']['items'])
-                        url = data['artists']['next']
-                    else:
-                        logger.error(f"Failed to get followed artists: {await response.text()}")
-                        break
-        
-        logger.info(f"Found {len(artists)} followed artists")
-        
-        new_releases_count = 0
-        days_threshold = int(SupabaseDB.get_status('release_days_threshold') or '3')  # Default to 3 days
-        
-        # Process artists in smaller batches to avoid session issues
-        for i in range(0, len(artists), 10):
-            artist_batch = artists[i:i+10]
-            
-            async with aiohttp.ClientSession() as session:
-                for artist in artist_batch:
-                    # Get artist's latest releases
-                    await spotify_api.rate_limiter.acquire()
-                    album_url = f"https://api.spotify.com/v1/artists/{artist['id']}/albums?include_groups=album,single&market=US&limit=5"
-                    async with session.get(album_url, headers=headers) as album_response:
-                        if album_response.status == 200:
-                            album_data = await album_response.json()
-                            for album in album_data['items']:
-                                # Check if release is recent
-                                if not is_recent_release(album['release_date'], days_threshold):
-                                    logger.debug(f"Skipping old release: {album['name']} from {album['release_date']}")
-                                    continue
-                                    
-                                release_id = f"spotify_{album['id']}"
-                                if not SupabaseDB.is_posted(release_id):
-                                    # Get full album details
-                                    album_details = await spotify_api.get_album_details(album['id'])
-                                    if album_details:
-                                        release_data = {
-                                            'artist': album_details['artists'][0]['name'],
-                                            'release': album_details['name'],
-                                            'release_date': album_details['release_date'],
-                                            'release_type': album_details['album_type'],
-                                            'tracks_count': album_details['total_tracks'],
-                                            'genres': ', '.join([f"#{g}" for g in album_details.get('genres', [])]),
-                                            'image_url': album_details['images'][0]['url'] if album_details['images'] else '',
-                                            'listen_url': album_details['external_urls']['spotify'],
-                                            'platform': 'spotify',
-                                            'created_at': datetime.now().isoformat()
-                                        }
-                                        SupabaseDB.add_to_queue(release_data)
-                                        new_releases_count += 1
-                                        logger.info(f"Added {album_details['artists'][0]['name']} - {album_details['name']} (Released: {album_details['release_date']}) to queue")
-        
-        logger.info(f"Check completed. Added {new_releases_count} new releases to queue.")
+        # Mark as posted in database
+        supabase.table('post_queue').update({
+            'posted': True,
+            'posted_at': datetime.now().isoformat()
+        }).eq('item_id', item_id).eq('item_type', item_type).execute()
     except Exception as e:
-        logger.error(f"Error in check_new_releases: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.error(f"Error removing from queue: {e}")
 
 # Commands
 @dp.message(CommandStart())
-@dp.message(Command("help"))
-async def cmd_help(message: Message):
-    help_text = """
-🤖 Spotify Release Tracker Bot
+async def cmd_start(message: types.Message):
+    """Handle the /start command"""
+    welcome_text = """🎵 Spotify Release Tracker Bot
 
 Available commands:
 /help - Show this help message
@@ -484,329 +206,288 @@ Available commands:
 /post - Post next item in queue manually
 /set_days [number] - Set days back to check (default: 3)
 
-You can also send Spotify or Bandcamp links to add them to the queue.
-"""
-    await message.reply(help_text)
-
-@dp.message(Command("queue"))
-async def cmd_queue(message: Message):
-    queue = SupabaseDB.get_queue()
-    if not queue:
-        await message.reply("📭 Post queue is empty.")
-        return
-
-    text = "📋 *Post Queue:*\n\n"
-    for idx, item in enumerate(queue, 1):
-        # Escape special characters for MarkdownV2
-        artist = escape_markdown_v2(item['artist'])
-        release = escape_markdown_v2(item['release'])
-        platform = escape_markdown_v2(item['platform'])
-        text += f"{idx}\\. {artist} \\- {release} \\({platform}\\)\n"
+You can also send Spotify or Bandcamp links to add them to the queue."""
     
-    await message.reply(text, parse_mode="MarkdownV2")
+    await message.answer(welcome_text)
 
-@dp.message(Command("queue_clear"))
-async def cmd_queue_clear(message: Message):
-    SupabaseDB.clear_queue()
-    await message.reply("✅ Queue cleared.")
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    """Show help message"""
+    help_text = """🎵 Spotify Release Tracker Bot
 
-@dp.message(Command("status"))
-async def cmd_status(message: Message):
-    last_check = SupabaseDB.get_status('last_check')
-    last_post = SupabaseDB.get_status('last_post')
-    days_threshold = SupabaseDB.get_status('release_days_threshold') or '3'
-    
-    status_text = "🤖 *Bot Status:*\n\n"
-    if last_check:
-        status_text += f"Last check: {escape_markdown_v2(last_check)}\n"
-    else:
-        status_text += "Last check: Never\n"
-    
-    if last_post:
-        status_text += f"Last post: {escape_markdown_v2(last_post)}\n"
-    else:
-        status_text += "Last post: Never\n"
-    
-    status_text += f"Queue length: {len(SupabaseDB.get_queue())}\n"
-    status_text += f"Checking releases from last {days_threshold} days\n"
-    
-    await message.reply(status_text, parse_mode="MarkdownV2")
+Available commands:
+/help - Show this help message
+/check - Check for new releases now
+/queue - Show posting queue
+/queue_clear - Clear entire queue
+/status - Show bot status
+/post - Post next item in queue manually
+/set_days [number] - Set days back to check (default: 3)
 
-@dp.message(Command("set_days"))
-async def cmd_set_days(message: Message):
-    """Set how many days back to check for new releases"""
-    try:
-        args = message.text.split()
-        if len(args) != 2 or not args[1].isdigit():
-            await message.reply("Usage: /set_days [number]\nExample: /set_days 30")
-            return
-
-        days = int(args[1])
-        SupabaseDB.update_status('release_days_threshold', str(days))
-        await message.reply(f"✅ Now checking for releases in the last {days} days")
-    except ValueError:
-        await message.reply("Invalid number format.")
-    except Exception as e:
-        logger.error(f"Error setting days threshold: {str(e)}")
-        await message.reply("❌ Error setting days threshold.")
+You can also send Spotify or Bandcamp links to add them to the queue."""
+    
+    await message.answer(help_text)
 
 @dp.message(Command("check"))
-async def cmd_check(message: Message):
-    await message.reply("🔍 Checking for new releases...")
+async def cmd_check(message: types.Message):
+    """Manually trigger release check"""
+    await message.answer("🔍 Checking for new releases...")
+    await check_for_new_releases()
+    await message.answer("✅ Check complete!")
+
+@dp.message(Command("queue"))
+async def cmd_queue(message: types.Message):
+    """Show posting queue"""
+    global posting_queue
+    
+    if not posting_queue:
+        await message.answer("📭 Post queue is empty.")
+        return
+    
+    queue_text = "📦 Post Queue:\n\n"
+    for i, item in enumerate(posting_queue, 1):
+        queue_text += f"{i}. {item['item_type']} ID: {item['item_id']}\n"
+    
+    await message.answer(queue_text)
+
+@dp.message(Command("queue_clear"))
+async def cmd_queue_clear(message: types.Message):
+    """Clear the posting queue"""
+    global posting_queue
+    
+    posting_queue = []
+    
     try:
-        await check_new_releases()
-        await message.reply("✅ Check completed!")
+        # Delete all unposted items from database
+        supabase.table('post_queue').update({
+            'posted': True,
+            'posted_at': datetime.now().isoformat()
+        }).eq('posted', False).execute()
+        
+        await message.answer("🗑️ Queue cleared!")
     except Exception as e:
-        logger.error(f"Error checking releases: {str(e)}")
-        await message.reply("❌ Error checking releases. Check logs for details.")
+        logger.error(f"Error clearing queue: {e}")
+        await message.answer("❌ Error clearing queue")
+
+@dp.message(Command("status"))
+async def cmd_status(message: types.Message):
+    """Show bot status"""
+    
+    last_check = await get_bot_status('last_check', 'Never')
+    last_post = await get_bot_status('last_post', 'Never')
+    days_back = await get_bot_status('release_days_threshold', '3')
+    queue_length = len(posting_queue)
+    
+    status_text = f"""🤖 Bot Status:
+
+Last check: {last_check}
+Last post: {last_post}
+Queue length: {queue_length}
+Checking releases from last {days_back} days"""
+    
+    await message.answer(status_text)
 
 @dp.message(Command("post"))
-async def cmd_post(message: Message):
+async def cmd_post(message: types.Message):
     """Manually post next item in queue"""
-    try:
-        await post_from_queue()
-        await message.reply("✅ Posted next item from queue!")
-    except Exception as e:
-        logger.error(f"Error in manual post: {str(e)}")
-        await message.reply("❌ Error posting item from queue.")
-
-# Handle all messages (including URLs)
-@dp.message()
-async def handle_message(message: Message):
-    text = message.text
-    if not text:
+    if not posting_queue:
+        await message.answer("📭 Post queue is empty.")
         return
+    
+    item = posting_queue[0]
+    success = await post_next_item()
+    
+    if success:
+        await message.answer(f"✅ Posted {item['item_type']} {item['item_id']}")
+    else:
+        await message.answer(f"❌ Failed to post {item['item_type']} {item['item_id']}")
 
-    logger.info(f"Received message: {text}")
+@dp.message(Command("set_days"))
+async def cmd_set_days(message: types.Message):
+    """Set days back to check for releases"""
+    try:
+        args = message.text.split()
+        if len(args) != 2:
+            await message.answer("Usage: /set_days [number]")
+            return
+        
+        days = int(args[1])
+        if days < 1 or days > 30:
+            await message.answer("Days must be between 1 and 30")
+            return
+        
+        await set_bot_status('release_days_threshold', str(days))
+        await message.answer(f"✅ Set release check to {days} days back")
+    except ValueError:
+        await message.answer("Invalid number. Usage: /set_days [number]")
 
-    # Check if message contains Spotify URL (exact match for full album URL)
-    spotify_album_match = re.search(r'https?://open\.spotify\.com/album/([a-zA-Z0-9]+)', text)
-    if spotify_album_match:
-        logger.info("Found Spotify album URL")
-        album_id = spotify_album_match.group(1)
+# Extract Spotify ID from various URL formats
+def extract_spotify_id(url: str) -> Optional[str]:
+    """Extract Spotify ID from URL"""
+    for pattern in SPOTIFY_URL_PATTERNS:
+        match = re.search(pattern, url, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+# Message handler for links
+@dp.message(lambda message: message.text and any(re.search(pattern, message.text) for pattern in SPOTIFY_URL_PATTERNS))
+async def handle_spotify_link(message: types.Message):
+    """Handle Spotify album links"""
+    logger.info(f"Received message: {message.text}")
+    
+    album_id = extract_spotify_id(message.text)
+    if album_id:
+        logger.info(f"Found Spotify album URL")
         logger.info(f"Matched album ID: {album_id}")
         
-        album_data = await spotify_api.get_album_details(album_id)
-        if album_data:
-            release_data = {
-                'artist': album_data['artists'][0]['name'],
-                'release': album_data['name'],
-                'release_date': album_data['release_date'],
-                'release_type': album_data['album_type'],
-                'tracks_count': album_data['total_tracks'],
-                'genres': ', '.join([f"#{g}" for g in album_data.get('genres', [])]),
-                'image_url': album_data['images'][0]['url'] if album_data['images'] else '',
-                'listen_url': album_data['external_urls']['spotify'],
-                'platform': 'spotify',
-                'created_at': datetime.now().isoformat()
-            }
-            SupabaseDB.add_to_queue(release_data)
-            await message.reply("✅ Added to posting queue!")
+        # Add to queue
+        if await add_to_queue(album_id, 'album'):
+            await message.answer(f"✅ Added album to queue")
         else:
-            await message.reply("❌ Failed to get album details.")
+            await message.answer(f"ℹ️ Album already in queue")
+    else:
+        logger.info("No Spotify album URL found")
+
+# Follow artists function
+async def get_followed_artists() -> Set[str]:
+    """Get list of followed artists from database"""
+    try:
+        result = supabase.table('followed_artists').select('id').execute()
+        return {artist['id'] for artist in result.data} if result.data else set()
+    except Exception as e:
+        logger.error(f"Error getting followed artists: {e}")
+        return set()
+
+# Check for new releases
+async def check_for_new_releases():
+    """Check for new releases from followed artists"""
+    logger.info("Starting to check for new releases...")
     
-    # Check for Spotify track URL (convert to album)
-    elif 'spotify.com/track' in text:
-        track_match = re.search(r'https?://open\.spotify\.com/track/([a-zA-Z0-9]+)', text)
-        if track_match:
-            track_id = track_match.group(1)
-            track_data = await spotify_api.get_track_details(track_id)
-            if track_data:
-                # Get track's album info
-                album_id = track_data['album']['id']
-                album_data = await spotify_api.get_album_details(album_id)
-                if album_data:
-                    release_data = {
-                        'artist': album_data['artists'][0]['name'],
-                        'release': album_data['name'],
-                        'release_date': album_data['release_date'],
-                        'release_type': album_data['album_type'],
-                        'tracks_count': album_data['total_tracks'],
-                        'genres': ', '.join([f"#{g}" for g in album_data.get('genres', [])]),
-                        'image_url': album_data['images'][0]['url'] if album_data['images'] else '',
-                        'listen_url': album_data['external_urls']['spotify'],
-                        'platform': 'spotify',
-                        'created_at': datetime.now().isoformat()
-                    }
-                    SupabaseDB.add_to_queue(release_data)
-                    await message.reply("✅ Added to posting queue!")
-                else:
-                    await message.reply("❌ Failed to get track/album details.")
-
-    # Check if message contains Bandcamp URL
-    elif 'bandcamp.com' in text:
-        logger.info("Found Bandcamp URL")
-        url_match = re.search(r'https?://[a-zA-Z0-9.-]+\.bandcamp\.com/album/[a-zA-Z0-9-]+', text)
-        if url_match:
-            url = url_match.group(0)
-            logger.info(f"Matched Bandcamp URL: {url}")
-            release_info = await BandcampScraper.get_release_info(url)
-            if release_info:
-                logger.info(f"Bandcamp data received: {release_info['title']}")
-                release_data = {
-                    'artist': release_info['artist'],
-                    'release': release_info['title'],
-                    'release_date': release_info['release_date'],
-                    'release_type': 'album' if len(release_info['tracks']) > 1 else 'single',
-                    'tracks_count': len(release_info['tracks']),
-                    'genres': ', '.join([f"#{g}" for g in release_info['genres']]),
-                    'image_url': release_info['image_url'],
-                    'listen_url': url,
-                    'platform': 'bandcamp',
-                    'created_at': datetime.now().isoformat()
-                }
-                SupabaseDB.add_to_queue(release_data)
-                await message.reply("✅ Added to posting queue!")
-            else:
-                await message.reply("❌ Failed to get Bandcamp release details.")
-                logger.error(f"Failed to get Bandcamp details for {url}")
-        else:
-            logger.info("No match found for Bandcamp regex")
-            await message.reply("❌ Invalid Bandcamp link format")
-
-# Post from queue
-async def post_from_queue():
-    queue = SupabaseDB.get_queue()
-    if not queue:
+    followed_artists = await get_followed_artists()
+    logger.info(f"Found {len(followed_artists)} followed artists")
+    
+    if not followed_artists:
+        logger.info("No followed artists to check")
         return
+    
+    # Get release days threshold
+    days_back = int(await get_bot_status('release_days_threshold', '3'))
+    
+    cutoff_date = datetime.now() - timedelta(days=days_back)
+    
+    # Check followed artists
+    for artist_id in followed_artists:
+        try:
+            # Get artist albums with limit
+            albums = sp.artist_albums(artist_id, album_type='album,single', country='US', limit=10)
+            
+            for album in albums['items']:
+                release_date = album['release_date']
+                
+                # Parse release date
+                try:
+                    if len(release_date) == 4:  # Year only
+                        release_datetime = datetime.strptime(release_date, '%Y')
+                    elif len(release_date) == 7:  # Year-month
+                        release_datetime = datetime.strptime(release_date, '%Y-%m')
+                    else:  # Full date
+                        release_datetime = datetime.strptime(release_date, '%Y-%m-%d')
+                except ValueError:
+                    logger.error(f"Failed to parse release date: {release_date}")
+                    continue
+                
+                # Check if within threshold
+                if release_datetime >= cutoff_date:
+                    album_id = album['id']
+                    logger.info(f"Found recent release: {album['name']} ({release_date})")
+                    await add_to_queue(album_id, 'album')
+        
+        except Exception as e:
+            logger.error(f"Error checking artist {artist_id}: {e}")
+    
+    # Update last check time
+    await set_bot_status('last_check', datetime.now().isoformat())
 
-    item = queue[0]
-    queue_id = item['id']
+# Post next item from queue
+async def post_next_item() -> bool:
+    """Post next item from queue to Telegram channel"""
+    global posting_queue
+    
+    if not posting_queue:
+        return False
+    
+    item = posting_queue[0]
     
     try:
-        # Download image
-        if item['image_url']:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(item['image_url']) as response:
-                    if response.status == 200:
-                        image_data = await response.read()
-                        image_path = f"temp_image_{queue_id}.jpg"
-                        with open(image_path, 'wb') as f:
-                            f.write(image_data)
-                        
-                        # Send post with image
-                        photo = FSInputFile(image_path)
-                        await bot.send_photo(
-                            chat_id=TELEGRAM_CHANNEL_ID,
-                            photo=photo,
-                            caption=format_post(item),
-                            parse_mode="MarkdownV2"
-                        )
-                        
-                        # Clean up
-                        os.remove(image_path)
-                    else:
-                        # Send without image if download fails
-                        await bot.send_message(
-                            chat_id=TELEGRAM_CHANNEL_ID,
-                            text=format_post(item),
-                            parse_mode="MarkdownV2"
-                        )
-        else:
-            # Send without image
-            await bot.send_message(
-                chat_id=TELEGRAM_CHANNEL_ID,
-                text=format_post(item),
-                parse_mode="MarkdownV2"
-            )
-        
-        SupabaseDB.remove_from_queue(queue_id)
-        SupabaseDB.mark_as_posted(f"{item['platform']}_{queue_id}", item['artist'], item['release'])
-        SupabaseDB.update_status('last_post', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        logger.info(f"Posted {item['artist']} - {item['release']}")
-        
+        if item['item_type'] == 'album':
+            album = sp.album(item['item_id'])
+            
+            # Create message text
+            message_text = f"🎵 New Release Alert!\n\n"
+            message_text += f"🎤 Artist: {', '.join([artist['name'] for artist in album['artists']])}\n"
+            message_text += f"💿 Album: {album['name']}\n"
+            message_text += f"📅 Release Date: {album['release_date']}\n"
+            message_text += f"🔢 Tracks: {album['total_tracks']}\n\n"
+            message_text += f"🔗 Listen on Spotify: https://open.spotify.com/album/{item['item_id']}"
+            
+            # Send to channel
+            channel_id = os.getenv('CHANNEL_ID')
+            await bot.send_message(channel_id, message_text, parse_mode=ParseMode.MARKDOWN_V2)
+            
+            # Remove from queue
+            await remove_from_queue(item['item_id'], item['item_type'])
+            
+            # Update last post time
+            await set_bot_status('last_post', datetime.now().isoformat())
+            
+            return True
+    
     except Exception as e:
-        logger.error(f"Error posting: {str(e)}")
+        logger.error(f"Error posting item: {e}")
+        return False
 
-# Инициализация таблиц Supabase
-def init_supabase_tables():
-    try:
-        # Create tables if they don't exist
-        create_queries = [
-            """
-            CREATE TABLE IF NOT EXISTS posted_releases (
-                id TEXT PRIMARY KEY,
-                artist TEXT,
-                release TEXT,
-                date_posted TIMESTAMP
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS post_queue (
-                id SERIAL PRIMARY KEY,
-                artist TEXT,
-                release TEXT,
-                release_date TEXT,
-                release_type TEXT,
-                tracks_count INTEGER,
-                genres TEXT,
-                image_url TEXT,
-                listen_url TEXT,
-                platform TEXT,
-                created_at TIMESTAMP,
-                scheduled_time TIMESTAMP
-            )
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS bot_status (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-            """
-        ]
+# Schedule functions
+async def schedule_checker():
+    """Background task to check for new releases"""
+    while True:
+        try:
+            await check_for_new_releases()
+        except Exception as e:
+            logger.error(f"Error in schedule_checker: {e}")
         
-        for query in create_queries:
-            try:
-                supabase.rpc('run_sql', {'sql': query}).execute()
-            except Exception as e:
-                logger.info(f"Table already exists or error: {str(e)}")
-                
-    except Exception as e:
-        logger.error(f"Error initializing Supabase tables: {str(e)}")
+        # Wait for 1 hour
+        await asyncio.sleep(3600)
+
+async def schedule_poster():
+    """Background task to post items from queue"""
+    while True:
+        if posting_queue:
+            success = await post_next_item()
+            if success:
+                logger.info("Posted next item from queue")
+            else:
+                logger.error("Failed to post next item")
+        
+        # Wait for defined interval
+        interval = int(await get_bot_status('post_interval', '3600'))
+        await asyncio.sleep(interval)
 
 # Main function
 async def main():
-    # Initialize Supabase tables
-    init_supabase_tables()
+    """Start the bot"""
+    # Initialize database
+    await init_db()
     
-    # Start periodic tasks
-    async def periodic_check():
-        while True:
-            try:
-                await check_new_releases()
-            except Exception as e:
-                logger.error(f"Error in periodic check: {str(e)}")
-            await asyncio.sleep(CHECK_INTERVAL_HOURS * 3600)
+    # Load queue from database
+    await load_queue()
     
-    async def periodic_post():
-        while True:
-            try:
-                await post_from_queue()
-            except Exception as e:
-                logger.error(f"Error in periodic post: {str(e)}")
-            
-            # Check for custom posting interval
-            interval_str = SupabaseDB.get_status('post_interval')
-            interval_minutes = int(interval_str) if interval_str else 60  # default 60 minutes
-            await asyncio.sleep(interval_minutes * 60)
+    # Start background tasks
+    check_task = asyncio.create_task(schedule_checker())
+    post_task = asyncio.create_task(schedule_poster())
     
-    # Start tasks
-    check_task = asyncio.create_task(periodic_check())
-    post_task = asyncio.create_task(periodic_post())
-    
-    try:
-        # Run all tasks concurrently
-        await dp.start_polling(bot, skip_updates=True)
-    except asyncio.CancelledError:
-        logger.info("Shutting down...")
-    except Exception as e:
-        logger.error(f"Error in main: {str(e)}")
-    finally:
-        # Cleanup
-        await bot.session.close()
-        check_task.cancel()
-        post_task.cancel()
-        await asyncio.gather(check_task, post_task, return_exceptions=True)
+    # Start bot
+    await dp.start_polling(bot)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main())
