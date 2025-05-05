@@ -66,43 +66,32 @@ SPOTIFY_URL_PATTERNS = [
     r'spotify:album:([a-zA-Z0-9]+)'
 ]
 
-# Database initialization
+# Database initialization - removed run_sql, now uses direct SQL
 async def init_db():
     """Initialize database tables"""
+    logger.info("INIT_DB: Starting database initialization...")
     try:
         # Create bot_status table
-        await supabase.rpc('run_sql', {'sql': '''
-            CREATE TABLE IF NOT EXISTS bot_status (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );
-        '''}).execute()
-        
-        # Create followed_artists table
-        await supabase.rpc('run_sql', {'sql': '''
-            CREATE TABLE IF NOT EXISTS followed_artists (
-                id TEXT PRIMARY KEY,
-                name TEXT,
-                last_release_date TEXT,
-                created_at TIMESTAMPTZ DEFAULT NOW()
-            );
-        '''}).execute()
-        
-        # Create post_queue table
-        await supabase.rpc('run_sql', {'sql': '''
-            CREATE TABLE IF NOT EXISTS post_queue (
-                id SERIAL PRIMARY KEY,
-                item_id TEXT,
-                item_type TEXT,
-                added_at TIMESTAMPTZ DEFAULT NOW(),
-                posted BOOLEAN DEFAULT FALSE,
-                posted_at TIMESTAMPTZ
-            );
-        '''}).execute()
-        
-        logger.info("Database initialized successfully")
+        supabase.from_("bot_status").select("*").limit(1).execute()
+        logger.info("INIT_DB: bot_status table exists")
     except Exception as e:
-        logger.error(f"Table already exists or error: {e}")
+        logger.error(f"INIT_DB: Error with bot_status table: {e}")
+    
+    try:
+        # Check followed_artists table
+        supabase.from_("followed_artists").select("*").limit(1).execute()
+        logger.info("INIT_DB: followed_artists table exists")
+    except Exception as e:
+        logger.error(f"INIT_DB: Error with followed_artists table: {e}")
+    
+    try:
+        # Check post_queue table
+        supabase.from_("post_queue").select("*").limit(1).execute()
+        logger.info("INIT_DB: post_queue table exists")
+    except Exception as e:
+        logger.error(f"INIT_DB: Error with post_queue table: {e}")
+    
+    logger.info("INIT_DB: Database initialization complete")
 
 # Helper functions
 async def get_bot_status(key: str, default=None):
@@ -134,33 +123,45 @@ post_task = None
 async def load_queue():
     """Load posting queue from database"""
     global posting_queue
+    logger.info("LOAD_QUEUE: Starting to load queue from database...")
     try:
+        # Check if table exists first
         result = supabase.table('post_queue').select('*').eq('posted', False).order('id').execute()
+        logger.info(f"LOAD_QUEUE: Database query result: {result}")
+        
         posting_queue = result.data if result.data else []
-        logger.info(f"Loaded {len(posting_queue)} items from queue")
+        logger.info(f"LOAD_QUEUE: Loaded {len(posting_queue)} items from queue")
+        logger.info(f"LOAD_QUEUE: Queue contents: {posting_queue}")
     except Exception as e:
-        logger.error(f"Error loading queue: {e}")
+        logger.error(f"LOAD_QUEUE: Error loading queue: {e}")
+        posting_queue = []
 
 async def save_queue():
     """Save queue to database"""
+    logger.info("SAVE_QUEUE: Starting to save queue to database...")
     try:
-        for item in posting_queue:
+        for i, item in enumerate(posting_queue):
             if 'id' not in item:  # New item
-                supabase.table('post_queue').insert({
+                logger.info(f"SAVE_QUEUE: Saving new item {i}: {item}")
+                result = supabase.table('post_queue').insert({
                     'item_id': item['item_id'],
                     'item_type': item['item_type'],
                     'added_at': item.get('added_at', datetime.now().isoformat())
                 }).execute()
+                logger.info(f"SAVE_QUEUE: Insert result: {result}")
     except Exception as e:
-        logger.error(f"Error saving queue: {e}")
+        logger.error(f"SAVE_QUEUE: Error saving queue: {e}")
 
 async def add_to_queue(item_id: str, item_type: str):
     """Add item to queue"""
     global posting_queue
     
+    logger.info(f"ADD_TO_QUEUE: Attempting to add {item_type} {item_id}")
+    
     # Check if already in queue
     for item in posting_queue:
         if item['item_id'] == item_id and item['item_type'] == item_type:
+            logger.info(f"ADD_TO_QUEUE: Item {item_id} already exists in memory queue")
             return False
     
     new_item = {
@@ -169,19 +170,23 @@ async def add_to_queue(item_id: str, item_type: str):
         'added_at': datetime.now().isoformat()
     }
     
+    logger.info(f"ADD_TO_QUEUE: Adding to memory queue: {new_item}")
     posting_queue.append(new_item)
     
     # Save to database
     try:
-        supabase.table('post_queue').insert({
+        logger.info(f"ADD_TO_QUEUE: Attempting to save to database...")
+        result = supabase.table('post_queue').insert({
             'item_id': item_id,
             'item_type': item_type,
             'added_at': new_item['added_at']
         }).execute()
-        logger.info(f"Added {item_type} {item_id} to queue")
+        
+        logger.info(f"ADD_TO_QUEUE: Database insert result: {result}")
+        logger.info(f"ADD_TO_QUEUE: Successfully added {item_type} {item_id} to queue")
         return True
     except Exception as e:
-        logger.error(f"Error adding to queue: {e}")
+        logger.error(f"ADD_TO_QUEUE: Error adding to queue: {e}")
         # Remove from memory if database insert failed
         posting_queue.remove(new_item)
         return False
@@ -190,17 +195,21 @@ async def remove_from_queue(item_id: str, item_type: str):
     """Remove item from queue"""
     global posting_queue
     
+    logger.info(f"REMOVE_FROM_QUEUE: Removing {item_type} {item_id}")
+    
     posting_queue = [item for item in posting_queue 
                     if not (item['item_id'] == item_id and item['item_type'] == item_type)]
     
     try:
         # Mark as posted in database
-        supabase.table('post_queue').update({
+        result = supabase.table('post_queue').update({
             'posted': True,
             'posted_at': datetime.now().isoformat()
         }).eq('item_id', item_id).eq('item_type', item_type).execute()
+        
+        logger.info(f"REMOVE_FROM_QUEUE: Database update result: {result}")
     except Exception as e:
-        logger.error(f"Error removing from queue: {e}")
+        logger.error(f"REMOVE_FROM_QUEUE: Error removing from queue: {e}")
 
 # Commands
 @dp.message(CommandStart())
@@ -251,6 +260,9 @@ async def cmd_queue(message: types.Message):
     """Show posting queue"""
     global posting_queue
     
+    logger.info(f"CMD_QUEUE: Current queue state: {posting_queue}")
+    logger.info(f"CMD_QUEUE: Queue length: {len(posting_queue)}")
+    
     if not posting_queue:
         await message.answer("📭 Post queue is empty.")
         return
@@ -270,14 +282,15 @@ async def cmd_queue_clear(message: types.Message):
     
     try:
         # Delete all unposted items from database
-        supabase.table('post_queue').update({
+        result = supabase.table('post_queue').update({
             'posted': True,
             'posted_at': datetime.now().isoformat()
         }).eq('posted', False).execute()
         
+        logger.info(f"QUEUE_CLEAR: Database update result: {result}")
         await message.answer("🗑️ Queue cleared!")
     except Exception as e:
-        logger.error(f"Error clearing queue: {e}")
+        logger.error(f"QUEUE_CLEAR: Error clearing queue: {e}")
         await message.answer("❌ Error clearing queue")
 
 @dp.message(Command("status"))
@@ -345,20 +358,23 @@ def extract_spotify_id(url: str) -> Optional[str]:
 @dp.message(lambda message: message.text and any(re.search(pattern, message.text) for pattern in SPOTIFY_URL_PATTERNS))
 async def handle_spotify_link(message: types.Message):
     """Handle Spotify album links"""
-    logger.info(f"Received message: {message.text}")
+    logger.info(f"HANDLE_SPOTIFY_LINK: Received message: {message.text}")
     
     album_id = extract_spotify_id(message.text)
     if album_id:
-        logger.info(f"Found Spotify album URL")
-        logger.info(f"Matched album ID: {album_id}")
+        logger.info(f"HANDLE_SPOTIFY_LINK: Found Spotify album URL")
+        logger.info(f"HANDLE_SPOTIFY_LINK: Matched album ID: {album_id}")
         
         # Add to queue
-        if await add_to_queue(album_id, 'album'):
+        result = await add_to_queue(album_id, 'album')
+        logger.info(f"HANDLE_SPOTIFY_LINK: Add to queue result: {result}")
+        
+        if result:
             await message.answer(f"✅ Added album to queue")
         else:
             await message.answer(f"ℹ️ Album already in queue")
     else:
-        logger.info("No Spotify album URL found")
+        logger.info("HANDLE_SPOTIFY_LINK: No Spotify album URL found")
 
 # Follow artists function
 async def get_followed_artists() -> Set[str]:
@@ -473,12 +489,15 @@ async def schedule_checker():
 async def schedule_poster():
     """Background task to post items from queue"""
     while True:
+        logger.info(f"SCHEDULE_POSTER: Checking queue. Length: {len(posting_queue)}")
         if posting_queue:
             success = await post_next_item()
             if success:
-                logger.info("Posted next item from queue")
+                logger.info("SCHEDULE_POSTER: Posted next item from queue")
             else:
-                logger.error("Failed to post next item")
+                logger.error("SCHEDULE_POSTER: Failed to post next item")
+        else:
+            logger.info("SCHEDULE_POSTER: Queue is empty")
         
         # Wait for defined interval or default to 1 hour
         interval = int(await get_bot_status('post_interval', '3600'))
@@ -497,6 +516,7 @@ async def main():
     check_task = asyncio.create_task(schedule_checker())
     post_task = asyncio.create_task(schedule_poster())
     
+    logger.info("MAIN: Starting bot polling...")
     # Start bot
     await dp.start_polling(bot)
 
