@@ -49,9 +49,30 @@ auth_manager._token_info = token_info
 token_info = auth_manager.refresh_access_token(SPOTIFY_REFRESH_TOKEN)
 sp = spotipy.Spotify(auth=token_info['access_token'])
 
+# Store processed albums to avoid duplicates
+processed_albums = set()
+
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer("Бот работает! Отправьте ссылку на альбом Spotify")
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    help_text = """🎵 Spotify Bot
+
+Available commands:
+/help - Show this help message
+/start - Start the bot
+
+Send Spotify album links to add them to channel."""
+    
+    await message.answer(help_text)
+
+@dp.message(Command("clear"))
+async def cmd_clear(message: Message):
+    global processed_albums
+    processed_albums.clear()
+    await message.answer("🗑️ Cleared processed albums cache")
 
 @dp.message()
 async def handle_message(message: Message):
@@ -59,13 +80,14 @@ async def handle_message(message: Message):
         try:
             album_id = re.search(r"album/([a-zA-Z0-9]+)", message.text).group(1)
             
-            album = sp.album(album_id)
-            artist = album['artists'][0]['name']
-            album_name = album['name']
+            # Check if already processed
+            if album_id in processed_albums:
+                await message.answer("ℹ️ This album has already been posted")
+                return
             
-            response = f"🎵 {artist} - {album_name}\n"
-            response += f"📅 {album['release_date']}\n"
-            response += f"🔗 {message.text}"
+            album = sp.album(album_id)
+            artist = ', '.join([artist['name'] for artist in album['artists']])
+            album_name = album['name']
             
             # Post to channel
             if CHANNEL_ID:
@@ -77,9 +99,13 @@ async def handle_message(message: Message):
                 message_text += f"🔗 Listen on Spotify: {message.text}"
                 
                 await bot.send_message(CHANNEL_ID, message_text)
-                await message.answer(response + "\n\n✅ Posted to channel")
+                
+                # Mark as processed
+                processed_albums.add(album_id)
+                
+                await message.answer(f"✅ Posted album to channel: {artist} - {album_name}")
             else:
-                await message.answer(response)
+                await message.answer(f"🎵 {artist} - {album_name}\n📅 {album['release_date']}")
                 
         except Exception as e:
             logger.error(f"Error: {e}")
