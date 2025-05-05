@@ -3,7 +3,7 @@ import logging
 import os
 import re
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List
 
 import spotipy
 from aiogram import Bot, Dispatcher, types
@@ -50,16 +50,14 @@ if not auth_manager.get_cached_token():
 
 sp = spotipy.Spotify(auth_manager=auth_manager)
 
-# Patterns for Spotify and Bandcamp URLs
+# Patterns for Spotify URLs
 SPOTIFY_URL_PATTERNS = [
     r'https://open\.spotify\.com/album/([a-zA-Z0-9]+)',
     r'spotify:album:([a-zA-Z0-9]+)'
 ]
 
-BANDCAMP_URL_PATTERN = r'https?://(?:(.+)\.)?bandcamp\.com/album/(.+)'
-
 # Queue
-posting_queue: List[Dict] = []
+posting_queue = []
 
 async def load_queue():
     global posting_queue
@@ -71,7 +69,7 @@ async def load_queue():
         logger.error(f"Error loading queue: {e}")
         posting_queue = []
 
-async def add_to_queue(item_id: str, item_type: str, url: str = None):
+async def add_to_queue(item_id: str, item_type: str):
     global posting_queue
     
     # Check if already in queue
@@ -82,8 +80,7 @@ async def add_to_queue(item_id: str, item_type: str, url: str = None):
     new_item = {
         'item_id': item_id,
         'item_type': item_type,
-        'added_at': datetime.now().isoformat(),
-        'metadata': {'url': url} if url else None
+        'added_at': datetime.now().isoformat()
     }
     
     posting_queue.append(new_item)
@@ -114,20 +111,16 @@ async def remove_from_queue(item_id: str, item_type: str):
     except Exception as e:
         logger.error(f"Error removing from queue: {e}")
 
-@dp.message(lambda message: message and message.text and (
-    any(re.search(pattern, message.text) for pattern in SPOTIFY_URL_PATTERNS) or
-    re.search(BANDCAMP_URL_PATTERN, message.text)
-))
-async def handle_links(message: types.Message):
-    """Handle Spotify and Bandcamp links"""
-    logger.info(f"Received message: {message.text}")
+@dp.message(lambda message: message and message.text and any(re.search(pattern, message.text) for pattern in SPOTIFY_URL_PATTERNS))
+async def handle_spotify_link(message: types.Message):
+    """Handle Spotify album links"""
+    logger.info(f"Received Spotify link: {message.text}")
     
-    # Check Spotify
     for pattern in SPOTIFY_URL_PATTERNS:
         match = re.search(pattern, message.text)
         if match:
             album_id = match.group(1)
-            logger.info(f"Found Spotify album ID: {album_id}")
+            logger.info(f"Found album ID: {album_id}")
             
             result = await add_to_queue(album_id, 'album')
             if result:
@@ -136,29 +129,11 @@ async def handle_links(message: types.Message):
                 await message.answer(f"ℹ️ Album already in queue")
             return
     
-    # Check Bandcamp
-    match = re.search(BANDCAMP_URL_PATTERN, message.text)
-    if match:
-        band = match.group(1) or 'unknown'
-        album_url = match.group(2)
-        item_id = f"{band}_{album_url}"
-        logger.info(f"Found Bandcamp album: {item_id}")
-        
-        result = await add_to_queue(item_id, 'bandcamp', message.text)
-        if result:
-            await message.answer(f"✅ Added album to queue")
-        else:
-            await message.answer(f"ℹ️ Album already in queue")
-        return
-    
-    await message.answer("Invalid link")
+    await message.answer("Invalid Spotify link")
 
 @dp.message(Command("queue"))
 async def cmd_queue(message: types.Message):
-    """Show queue"""
     global posting_queue
-    
-    logger.info(f"Queue command: Current queue length = {len(posting_queue)}")
     
     if not posting_queue:
         await message.answer("📭 Post queue is empty.")
@@ -178,20 +153,7 @@ async def cmd_queue(message: types.Message):
                 queue_text += f"{i}. {artist_name} - {album_name}\n"
             except Exception as e:
                 logger.error(f"Error getting album details: {e}")
-                queue_text += f"{i}. album ID: {item_id}\n"
-        elif item_type == 'bandcamp':
-            # Parse Bandcamp ID
-            if item_id.startswith('unknown_'):
-                album_url = item_id.replace('unknown_', '')
-                queue_text += f"{i}. Bandcamp: {album_url}\n"
-            else:
-                # Parse band name and album URL from item_id
-                parts = item_id.split('_', 1)
-                if len(parts) == 2:
-                    band, album_url = parts
-                    queue_text += f"{i}. {band} - {album_url}\n"
-                else:
-                    queue_text += f"{i}. Bandcamp: {item_id}\n"
+                queue_text += f"{i}. {item_type} ID: {item_id}\n"
         else:
             queue_text += f"{i}. {item_type} ID: {item_id}\n"
     
@@ -199,10 +161,7 @@ async def cmd_queue(message: types.Message):
 
 @dp.message(Command("post"))
 async def cmd_post(message: types.Message):
-    """Post from queue"""
     global posting_queue
-    
-    logger.info(f"Post command: Queue length = {len(posting_queue)}")
     
     if not posting_queue:
         await message.answer("📭 Post queue is empty.")
@@ -213,7 +172,6 @@ async def cmd_post(message: types.Message):
         if item.get('item_type') == 'album':
             album = sp.album(item['item_id'])
             
-            # ОРИГИНАЛЬНЫЙ ФОРМАТ ВЫВОДА:
             message_text = f"🎵 New Release Alert!\n\n" \
                           f"🎤 Artist: {', '.join([artist['name'] for artist in album['artists']])}\n" \
                           f"💿 Album: {album['name']}\n" \
@@ -223,36 +181,15 @@ async def cmd_post(message: types.Message):
             
             await bot.send_message(CHANNEL_ID, message_text)
             
-        elif item.get('item_type') == 'bandcamp':
-            # Bandcamp format
-            metadata = item.get('metadata', {})
-            url = metadata.get('url', 'unknown')
+            await remove_from_queue(item['item_id'], item['item_type'])
             
-            message_text = f"🎵 New Release Alert!\n\n" \
-                          f"🎤 Bandcamp Release\n" \
-                          f"💿 Album ID: {item['item_id']}\n\n" \
-                          f"🔗 Listen on Bandcamp: {url}"
-            
-            await bot.send_message(CHANNEL_ID, message_text)
-        
-        await remove_from_queue(item['item_id'], item['item_type'])
-        
-        # Show what was posted
-        if item.get('item_type') == 'album':
-            album = sp.album(item['item_id'])
-            artist_name = ', '.join([artist['name'] for artist in album['artists']])
-            album_name = album['name']
-            await message.answer(f"✅ Posted: {artist_name} - {album_name}")
-        else:
-            await message.answer(f"✅ Posted {item['item_type']} {item['item_id']}")
-        
+            await message.answer(f"✅ Posted album {item['item_id']}")
     except Exception as e:
-        logger.error(f"Error in post command: {e}", exc_info=True)
-        await message.answer(f"❌ Error posting: {str(e)}")
+        logger.error(f"Error posting: {e}")
+        await message.answer(f"❌ Error posting: {e}")
 
 @dp.message(Command("clear"))
 async def cmd_clear(message: types.Message):
-    """Clear queue"""
     global posting_queue
     posting_queue = []
     try:
@@ -265,78 +202,9 @@ async def cmd_clear(message: types.Message):
         logger.error(f"Error clearing queue: {e}")
         await message.answer("❌ Error clearing queue")
 
-@dp.message(Command("help"))
-async def cmd_help(message: types.Message):
-    """Show help"""
-    help_text = """🎵 Spotify Release Tracker Bot
-
-Available commands:
-/help - Show this help message
-/queue - Show posting queue
-/post - Post next item in queue manually
-/clear - Clear posting queue
-
-You can also send Spotify or Bandcamp links to add them to the queue."""
-    
-    await message.answer(help_text)
-
-@dp.message(Command("status"))
-async def cmd_status(message: types.Message):
-    """Show status"""
-    status_text = f"""🤖 Bot Status:
-
-Queue length: {len(posting_queue)}"""
-    
-    await message.answer(status_text)
-
-async def schedule_poster():
-    """Background task to post items from queue"""
-    while True:
-        if posting_queue:
-            item = posting_queue[0]
-            try:
-                if item.get('item_type') == 'album':
-                    album = sp.album(item['item_id'])
-                    
-                    message_text = f"🎵 New Release Alert!\n\n" \
-                                  f"🎤 Artist: {', '.join([artist['name'] for artist in album['artists']])}\n" \
-                                  f"💿 Album: {album['name']}\n" \
-                                  f"📅 Release Date: {album['release_date']}\n" \
-                                  f"🔢 Tracks: {album['total_tracks']}\n\n" \
-                                  f"🔗 Listen on Spotify: https://open.spotify.com/album/{item['item_id']}"
-                    
-                    await bot.send_message(CHANNEL_ID, message_text)
-                    
-                elif item.get('item_type') == 'bandcamp':
-                    metadata = item.get('metadata', {})
-                    url = metadata.get('url', 'unknown')
-                    
-                    message_text = f"🎵 New Release Alert!\n\n" \
-                                  f"🎤 Bandcamp Release\n" \
-                                  f"💿 Album ID: {item['item_id']}\n\n" \
-                                  f"🔗 Listen on Bandcamp: {url}"
-                    
-                    await bot.send_message(CHANNEL_ID, message_text)
-                
-                await remove_from_queue(item['item_id'], item['item_type'])
-                logger.info(f"Posted {item['item_type']} {item['item_id']}")
-                
-            except Exception as e:
-                logger.error(f"Error posting: {e}")
-        
-        # Wait for interval
-        await asyncio.sleep(3600)  # 1 hour
-
 async def main():
-    logger.info("Starting bot initialization...")
-    
     await load_queue()
-    logger.info(f"Queue loaded. Length: {len(posting_queue)}")
-    
-    # Start background tasks
-    post_task = asyncio.create_task(schedule_poster())
-    
-    logger.info("Starting bot polling...")
+    logger.info("Starting bot...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
