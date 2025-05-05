@@ -129,7 +129,7 @@ async def handle_links(message: types.Message):
             album_id = match.group(1)
             logger.info(f"Found Spotify album ID: {album_id}")
             
-            result = await add_to_queue(album_id, 'spotify')
+            result = await add_to_queue(album_id, 'album')
             if result:
                 await message.answer(f"✅ Added album to queue")
             else:
@@ -168,7 +168,32 @@ async def cmd_queue(message: types.Message):
     for i, item in enumerate(posting_queue, 1):
         item_id = item.get('item_id', 'unknown')
         item_type = item.get('item_type', 'unknown')
-        queue_text += f"{i}. {item_type} ID: {item_id}\n"
+        
+        # Get album details for Spotify albums
+        if item_type == 'album':
+            try:
+                album = sp.album(item_id)
+                artist_name = ', '.join([artist['name'] for artist in album['artists']])
+                album_name = album['name']
+                queue_text += f"{i}. {artist_name} - {album_name}\n"
+            except Exception as e:
+                logger.error(f"Error getting album details: {e}")
+                queue_text += f"{i}. album ID: {item_id}\n"
+        elif item_type == 'bandcamp':
+            # Parse Bandcamp ID
+            if item_id.startswith('unknown_'):
+                album_url = item_id.replace('unknown_', '')
+                queue_text += f"{i}. Bandcamp: {album_url}\n"
+            else:
+                # Parse band name and album URL from item_id
+                parts = item_id.split('_', 1)
+                if len(parts) == 2:
+                    band, album_url = parts
+                    queue_text += f"{i}. {band} - {album_url}\n"
+                else:
+                    queue_text += f"{i}. Bandcamp: {item_id}\n"
+        else:
+            queue_text += f"{i}. {item_type} ID: {item_id}\n"
     
     await message.answer(queue_text)
 
@@ -185,7 +210,7 @@ async def cmd_post(message: types.Message):
     
     item = posting_queue[0]
     try:
-        if item.get('item_type') == 'spotify':
+        if item.get('item_type') == 'album':
             album = sp.album(item['item_id'])
             
             # ОРИГИНАЛЬНЫЙ ФОРМАТ ВЫВОДА:
@@ -211,7 +236,15 @@ async def cmd_post(message: types.Message):
             await bot.send_message(CHANNEL_ID, message_text)
         
         await remove_from_queue(item['item_id'], item['item_type'])
-        await message.answer(f"✅ Posted {item['item_type']} {item['item_id']}")
+        
+        # Show what was posted
+        if item.get('item_type') == 'album':
+            album = sp.album(item['item_id'])
+            artist_name = ', '.join([artist['name'] for artist in album['artists']])
+            album_name = album['name']
+            await message.answer(f"✅ Posted: {artist_name} - {album_name}")
+        else:
+            await message.answer(f"✅ Posted {item['item_type']} {item['item_id']}")
         
     except Exception as e:
         logger.error(f"Error in post command: {e}", exc_info=True)
@@ -262,7 +295,7 @@ async def schedule_poster():
         if posting_queue:
             item = posting_queue[0]
             try:
-                if item.get('item_type') == 'spotify':
+                if item.get('item_type') == 'album':
                     album = sp.album(item['item_id'])
                     
                     message_text = f"🎵 New Release Alert!\n\n" \
