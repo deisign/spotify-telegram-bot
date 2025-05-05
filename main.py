@@ -19,7 +19,6 @@ from spotipy.oauth2 import SpotifyClientCredentials
 
 # Supabase setup
 from supabase import create_client, Client
-from dotenv import load_dotenv
 
 # Configure logging
 logging.basicConfig(
@@ -28,26 +27,38 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
+# Railway environment variables - NO load_dotenv() needed
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
+
+# Check if required variables are set
+if not BOT_TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN not found in environment variables!")
+if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET:
+    raise ValueError("Spotify credentials not found in environment variables!")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("Supabase credentials not found in environment variables!")
+if not CHANNEL_ID:
+    raise ValueError("TELEGRAM_CHANNEL_ID not found in environment variables!")
 
 # Spotify credentials
 client_credentials_manager = SpotifyClientCredentials(
-    client_id=os.getenv("SPOTIFY_CLIENT_ID"),
-    client_secret=os.getenv("SPOTIFY_CLIENT_SECRET")
+    client_id=SPOTIFY_CLIENT_ID,
+    client_secret=SPOTIFY_CLIENT_SECRET
 )
 sp = spotipy.Spotify(client_credentials_manager=client_credentials_manager)
 
 # Telegram Bot configuration
-BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 # Supabase configuration
-url: str = os.getenv("SUPABASE_URL")
-key: str = os.getenv("SUPABASE_KEY")
-supabase: Client = create_client(url, key)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Constants
 SPOTIFY_URL_PATTERNS = [
@@ -432,8 +443,7 @@ async def post_next_item() -> bool:
             message_text += f"🔗 Listen on Spotify: https://open.spotify.com/album/{item['item_id']}"
             
             # Send to channel
-            channel_id = os.getenv('CHANNEL_ID')
-            await bot.send_message(channel_id, message_text, parse_mode=ParseMode.MARKDOWN_V2)
+            await bot.send_message(CHANNEL_ID, message_text, parse_mode=ParseMode.MARKDOWN_V2)
             
             # Remove from queue
             await remove_from_queue(item['item_id'], item['item_type'])
@@ -456,8 +466,9 @@ async def schedule_checker():
         except Exception as e:
             logger.error(f"Error in schedule_checker: {e}")
         
-        # Wait for 1 hour
-        await asyncio.sleep(3600)
+        # Wait for CHECK_INTERVAL_HOURS or default to 1 hour
+        interval_hours = int(os.getenv('CHECK_INTERVAL_HOURS', '1'))
+        await asyncio.sleep(interval_hours * 3600)
 
 async def schedule_poster():
     """Background task to post items from queue"""
@@ -469,7 +480,7 @@ async def schedule_poster():
             else:
                 logger.error("Failed to post next item")
         
-        # Wait for defined interval
+        # Wait for defined interval or default to 1 hour
         interval = int(await get_bot_status('post_interval', '3600'))
         await asyncio.sleep(interval)
 
