@@ -6,8 +6,8 @@ telebot
 pytz
 apscheduler
 flask
-aiogram==2.25.1
-aiohttp==3.9.1
 beautifulsoup4==4.12.2
 requests==2.31.0
 supabase==2.4.3
+aiogram
+aiohttp
