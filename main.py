@@ -2,8 +2,8 @@ import asyncio
 import logging
 import os
 import re
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Set
+from datetime import datetime
+from typing import List
 
 import spotipy
 from aiogram import Bot, Dispatcher, types
@@ -57,7 +57,7 @@ SPOTIFY_URL_PATTERNS = [
 ]
 
 # Queue
-posting_queue = []
+posting_queue: List[dict] = []
 
 async def load_queue():
     global posting_queue
@@ -75,6 +75,7 @@ async def add_to_queue(item_id: str, item_type: str):
     # Check if already in queue
     for item in posting_queue:
         if item.get('item_id') == item_id and item.get('item_type') == item_type:
+            logger.info(f"Item {item_id} already in queue")
             return False
     
     new_item = {
@@ -111,10 +112,10 @@ async def remove_from_queue(item_id: str, item_type: str):
     except Exception as e:
         logger.error(f"Error removing from queue: {e}")
 
-@dp.message(lambda message: message.text and any(re.search(pattern, message.text) for pattern in SPOTIFY_URL_PATTERNS))
+@dp.message(lambda message: message and message.text and any(re.search(pattern, message.text) for pattern in SPOTIFY_URL_PATTERNS))
 async def handle_spotify_link(message: types.Message):
     """Handle Spotify album links"""
-    logger.info(f"Received Spotify link: {message.text}")
+    logger.info(f"Received message: {message.text}")
     
     for pattern in SPOTIFY_URL_PATTERNS:
         match = re.search(pattern, message.text)
@@ -124,8 +125,10 @@ async def handle_spotify_link(message: types.Message):
             
             result = await add_to_queue(album_id, 'album')
             if result:
+                logger.info(f"Added album {album_id} to queue")
                 await message.answer(f"✅ Added album to queue")
             else:
+                logger.info(f"Album {album_id} already in queue")
                 await message.answer(f"ℹ️ Album already in queue")
             return
     
@@ -133,7 +136,10 @@ async def handle_spotify_link(message: types.Message):
 
 @dp.message(Command("queue"))
 async def cmd_queue(message: types.Message):
+    """Show queue"""
     global posting_queue
+    
+    logger.info(f"Queue command: Current queue length = {len(posting_queue)}")
     
     if not posting_queue:
         await message.answer("📭 Post queue is empty.")
@@ -141,13 +147,18 @@ async def cmd_queue(message: types.Message):
     
     queue_text = "📦 Post Queue:\n\n"
     for i, item in enumerate(posting_queue, 1):
-        queue_text += f"{i}. {item.get('item_type')} ID: {item.get('item_id')}\n"
+        item_id = item.get('item_id', 'unknown')
+        item_type = item.get('item_type', 'unknown')
+        queue_text += f"{i}. {item_type} ID: {item_id}\n"
     
     await message.answer(queue_text)
 
 @dp.message(Command("post"))
 async def cmd_post(message: types.Message):
+    """Post from queue"""
     global posting_queue
+    
+    logger.info(f"Post command: Queue length = {len(posting_queue)}")
     
     if not posting_queue:
         await message.answer("📭 Post queue is empty.")
@@ -163,17 +174,21 @@ async def cmd_post(message: types.Message):
                           f"📅 {album['release_date']}\n" \
                           f"🔗 https://open.spotify.com/album/{item['item_id']}"
             
+            logger.info(f"Sending to channel: {CHANNEL_ID}")
             await bot.send_message(CHANNEL_ID, message_text)
             
             await remove_from_queue(item['item_id'], item['item_type'])
             
             await message.answer(f"✅ Posted {item['item_type']} {item['item_id']}")
+        else:
+            await message.answer(f"❌ Unknown item type: {item.get('item_type')}")
     except Exception as e:
-        logger.error(f"Error posting: {e}")
-        await message.answer(f"❌ Error posting: {e}")
+        logger.error(f"Error in post command: {e}", exc_info=True)
+        await message.answer(f"❌ Error posting: {str(e)}")
 
 @dp.message(Command("clear"))
 async def cmd_clear(message: types.Message):
+    """Clear queue"""
     global posting_queue
     posting_queue = []
     try:
@@ -187,8 +202,17 @@ async def cmd_clear(message: types.Message):
         await message.answer("❌ Error clearing queue")
 
 async def main():
+    logger.info("Starting bot initialization...")
+    
+    # Check environment variables
+    logger.info(f"BOT_TOKEN: {'set' if BOT_TOKEN else 'not set'}")
+    logger.info(f"CHANNEL_ID: {'set' if CHANNEL_ID else 'not set'}")
+    logger.info(f"SUPABASE_URL: {'set' if SUPABASE_URL else 'not set'}")
+    
     await load_queue()
-    logger.info("Starting bot...")
+    logger.info(f"Queue loaded. Length: {len(posting_queue)}")
+    
+    logger.info("Starting bot polling...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
