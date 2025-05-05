@@ -5,9 +5,7 @@ import re
 from datetime import datetime
 
 import spotipy
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram import Bot, Dispatcher, executor, types
 from spotipy.oauth2 import SpotifyOAuth
 from supabase import create_client, Client
 
@@ -30,7 +28,7 @@ CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 
 # Initialize services
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+dp = Dispatcher(bot)
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Spotify setup
@@ -61,8 +59,7 @@ async def load_queue():
         logger.error(f"Error loading queue: {e}")
         posting_queue = []
 
-# КОМАНДЫ ДОЛЖНЫ БЫТЬ ПЕРВЫМИ
-@dp.message(Command("help"))
+@dp.message_handler(commands=['help'])
 async def cmd_help(message: types.Message):
     help_text = """🎵 Spotify Release Tracker Bot
 
@@ -76,7 +73,7 @@ You can also send Spotify links to add them to the queue."""
     
     await message.answer(help_text)
 
-@dp.message(Command("queue"))
+@dp.message_handler(commands=['queue'])
 async def cmd_queue(message: types.Message):
     if not posting_queue:
         await message.answer("📭 Post queue is empty.")
@@ -96,7 +93,7 @@ async def cmd_queue(message: types.Message):
     
     await message.answer(queue_text)
 
-@dp.message(Command("post"))
+@dp.message_handler(commands=['post'])
 async def cmd_post(message: types.Message):
     if not posting_queue:
         await message.answer("📭 Post queue is empty.")
@@ -113,7 +110,7 @@ async def cmd_post(message: types.Message):
                       f"🔢 Tracks: {album['total_tracks']}\n\n" \
                       f"🔗 Listen on Spotify: https://open.spotify.com/album/{item['item_id']}"
         
-        await bot.send_message(CHANNEL_ID, message_text, parse_mode=None)
+        await bot.send_message(CHANNEL_ID, message_text)
         
         # Remove from queue
         posting_queue.pop(0)
@@ -130,7 +127,7 @@ async def cmd_post(message: types.Message):
         logger.error(f"Error posting: {e}")
         await message.answer(f"❌ Error posting: {e}")
 
-@dp.message(Command("clear"))
+@dp.message_handler(commands=['clear'])
 async def cmd_clear(message: types.Message):
     global posting_queue
     posting_queue = []
@@ -143,8 +140,7 @@ async def cmd_clear(message: types.Message):
     except Exception as e:
         await message.answer("❌ Error clearing queue")
 
-# ОБРАБОТЧИК ССЫЛОК ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ
-@dp.message()
+@dp.message_handler()
 async def handle_spotify_link(message: types.Message):
     if not message.text:
         return
@@ -181,10 +177,9 @@ async def handle_spotify_link(message: types.Message):
             posting_queue.remove(new_item)
             await message.answer(f"ℹ️ Album already in queue")
 
-async def main():
+async def on_startup(dp):
     await load_queue()
-    logger.info("Starting bot...")
-    await dp.start_polling(bot)
+    logger.info("Bot started")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    executor.start_polling(dp, on_startup=on_startup)
