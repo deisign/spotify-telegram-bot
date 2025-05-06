@@ -2,11 +2,13 @@ import asyncio
 import logging
 import os
 import re
+import aiohttp
 from datetime import datetime
+from bs4 import BeautifulSoup
 
 import spotipy
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message
+from aiogram.types import Message, FSInputFile, URLInputFile
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from spotipy.oauth2 import SpotifyOAuth
@@ -63,6 +65,71 @@ def get_spotify_client():
         logger.error(f"Error refreshing Spotify token: {e}")
         return None
 
+# Function to scrape Bandcamp album info
+async def scrape_bandcamp(url):
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status != 200:
+                    return None
+                
+                html = await response.text()
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                # Extract data
+                result = {}
+                
+                # Artist name
+                artist_elem = soup.select_one('span[itemprop="byArtist"] a')
+                if artist_elem:
+                    result['artist'] = artist_elem.text.strip()
+                else:
+                    result['artist'] = "Unknown Artist"
+                
+                # Album name
+                album_elem = soup.select_one('h2[itemprop="name"]')
+                if album_elem:
+                    result['album'] = album_elem.text.strip()
+                else:
+                    result['album'] = "Unknown Album"
+                
+                # Release date
+                date_elem = soup.select_one('meta[itemprop="datePublished"]')
+                if date_elem and 'content' in date_elem.attrs:
+                    result['date'] = date_elem['content']
+                else:
+                    result['date'] = datetime.now().strftime("%Y-%m-%d")
+                
+                # Track count
+                tracks = soup.select('table[itemprop="tracks"] tr')
+                result['tracks'] = len(tracks) if tracks else "unknown"
+                
+                # Cover image
+                img_elem = soup.select_one('#tralbumArt img')
+                if img_elem and 'src' in img_elem.attrs:
+                    result['cover_url'] = img_elem['src']
+                
+                # Type (Album or Single)
+                result['type'] = "Album"  # Default to Album
+                
+                # Tags
+                tags = []
+                tags_elem = soup.select('.tag')
+                for tag in tags_elem[:3]:  # Get up to 3 tags
+                    tag_text = tag.text.strip()
+                    if tag_text:
+                        tags.append(tag_text)
+                result['tags'] = tags
+                
+                return result
+    except Exception as e:
+        logger.error(f"Error scraping Bandcamp: {e}")
+        return None
+
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     logger.info("Received /start command")
@@ -104,6 +171,10 @@ async def cmd_queue(message: Message):
             except Exception as e:
                 logger.error(f"Error getting album: {e}")
                 queue_text += f"{i}. album ID: {item.get('item_id')}\n"
+        elif item.get('item_type') == 'bandcamp':
+            metadata = item.get('metadata', {})
+            url = metadata.get('url', 'unknown')
+            queue_text += f"{i}. Bandcamp: {url}\n"
         else:
             queue_text += f"{i}. {item.get('item_type')} ID: {item.get('item_id')}\n"
     
@@ -146,6 +217,14 @@ async def cmd_post(message: Message):
             
             genre_tags = " ".join([f"#{genre.replace(' ', '')}" for genre in artist_genres]) if artist_genres else ""
             
+            # Получаем ссылку на обложку
+            cover_url = None
+            try:
+                if album['images'] and len(album['images']) > 0:
+                    cover_url = album['images'][0]['url']  # Берем самую большую обложку
+            except:
+                pass
+            
             # ТОЧНЫЙ ФОРМАТ ВЫВОДА ДЛЯ SPOTIFY
             message_text = f"**{artist_names}**\n" \
                            f"**{album_name}**\n" \
@@ -153,8 +232,12 @@ async def cmd_post(message: Message):
                            f"{genre_tags}\n" \
                            f"🎧 Listen on Spotify: https://open.spotify.com/album/{item['item_id']}"
             
-            # ПОСТИНГ В КАНАЛ
-            await bot.send_message(CHANNEL_ID, message_text, parse_mode="Markdown")
+            # ПОСТИНГ В КАНАЛ С ОБЛОЖКОЙ
+            if cover_url:
+                await bot.send_photo(CHANNEL_ID, cover_url, caption=message_text, parse_mode="Markdown")
+            else:
+                await bot.send_message(CHANNEL_ID, message_text, parse_mode="Markdown")
+                
             logger.info(f"Posted to channel {CHANNEL_ID}")
             
             # УДАЛЕНИЕ ИЗ ОЧЕРЕДИ
@@ -172,21 +255,49 @@ async def cmd_post(message: Message):
             await message.answer(f"✅ Posted album {artist_names} - {album_name}")
         
         elif item.get('item_type') == 'bandcamp':
-            # Для Bandcamp используем сохраненный URL и dummy данные
+            # Для Bandcamp используем скрейпинг
             url = item.get('metadata', {}).get('url', 'unknown')
-            artist_name = "Artist" 
-            album_name = "Album"
-            release_date = datetime.now().strftime("%Y-%m-%d")
             
-            # ТОЧНЫЙ ФОРМАТ ВЫВОДА ДЛЯ BANDCAMP
-            message_text = f"**{artist_name}**\n" \
-                           f"**{album_name}**\n" \
-                           f"{release_date}, Album, unknown tracks\n" \
-                           f"#bandcamp\n" \
-                           f"🎧 Listen on Bandcamp: {url}"
+            # Scrape Bandcamp
+            bandcamp_info = await scrape_bandcamp(url)
             
-            # ПОСТИНГ В КАНАЛ
-            await bot.send_message(CHANNEL_ID, message_text, parse_mode="Markdown")
+            if bandcamp_info:
+                artist_name = bandcamp_info.get('artist', 'Unknown Artist')
+                album_name = bandcamp_info.get('album', 'Unknown Album')
+                release_date = bandcamp_info.get('date', datetime.now().strftime("%Y-%m-%d"))
+                tracks = bandcamp_info.get('tracks', 'unknown')
+                album_type = bandcamp_info.get('type', 'Album')
+                cover_url = bandcamp_info.get('cover_url')
+                
+                # Get tags
+                tags = bandcamp_info.get('tags', [])
+                if not tags:
+                    tags = ['bandcamp']
+                
+                genre_tags = " ".join([f"#{tag.replace(' ', '')}" for tag in tags])
+                
+                # ТОЧНЫЙ ФОРМАТ ВЫВОДА ДЛЯ BANDCAMP
+                message_text = f"**{artist_name}**\n" \
+                               f"**{album_name}**\n" \
+                               f"{release_date}, {album_type}, {tracks} tracks\n" \
+                               f"{genre_tags}\n" \
+                               f"🎧 Listen on Bandcamp: {url}"
+                
+                # ПОСТИНГ В КАНАЛ С ОБЛОЖКОЙ
+                if cover_url:
+                    await bot.send_photo(CHANNEL_ID, cover_url, caption=message_text, parse_mode="Markdown")
+                else:
+                    await bot.send_message(CHANNEL_ID, message_text, parse_mode="Markdown")
+            else:
+                # Fallback if scraping failed
+                message_text = f"**Bandcamp Album**\n" \
+                               f"**Unknown Album**\n" \
+                               f"{datetime.now().strftime('%Y-%m-%d')}, Album, unknown tracks\n" \
+                               f"#bandcamp\n" \
+                               f"🎧 Listen on Bandcamp: {url}"
+                
+                await bot.send_message(CHANNEL_ID, message_text, parse_mode="Markdown")
+                
             logger.info(f"Posted to channel {CHANNEL_ID}")
             
             # УДАЛЕНИЕ ИЗ ОЧЕРЕДИ
