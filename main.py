@@ -128,23 +128,33 @@ async def cmd_post(message: Message):
         if item.get('item_type') == 'album' and sp:
             album = sp.album(item['item_id'])
             
-            # ТОЧНЫЙ ФОРМАТ ВЫВОДА
+            # Получаем информацию об альбоме
             artist_names = ', '.join([artist['name'] for artist in album['artists']])
             album_name = album['name']
             release_date = album['release_date']
             tracks = album['total_tracks']
+            album_type = "Album" if album['album_type'] == 'album' else "Single"
             
-            message_text = f"coma.fm\ncoma.fm\n\n" \
-                          f"🎵 New Release Alert!\n\n" \
-                          f"🎤 Artist: {artist_names}\n" \
-                          f"💿 Album: {album_name}\n" \
-                          f"📅 Release Date: {release_date}\n" \
-                          f"🔢 Tracks: {tracks}\n\n" \
-                          f"🔗 Listen on Spotify:\n" \
-                          f"https://open.spotify.com/album/{item['item_id']}"
+            # Получаем жанры (берем из первого артиста)
+            artist_genres = []
+            try:
+                if album['artists'] and len(album['artists']) > 0:
+                    artist = sp.artist(album['artists'][0]['id'])
+                    artist_genres = artist.get('genres', [])[:3]  # Берем максимум 3 жанра
+            except:
+                pass
+            
+            genre_tags = " ".join([f"#{genre.replace(' ', '')}" for genre in artist_genres]) if artist_genres else ""
+            
+            # ТОЧНЫЙ ФОРМАТ ВЫВОДА ДЛЯ SPOTIFY
+            message_text = f"**{artist_names}**\n" \
+                           f"**{album_name}**\n" \
+                           f"{release_date}, {album_type}, {tracks} tracks\n" \
+                           f"{genre_tags}\n" \
+                           f"🎧 Listen on Spotify: https://open.spotify.com/album/{item['item_id']}"
             
             # ПОСТИНГ В КАНАЛ
-            await bot.send_message(CHANNEL_ID, message_text)
+            await bot.send_message(CHANNEL_ID, message_text, parse_mode="Markdown")
             logger.info(f"Posted to channel {CHANNEL_ID}")
             
             # УДАЛЕНИЕ ИЗ ОЧЕРЕДИ
@@ -160,6 +170,39 @@ async def cmd_post(message: Message):
                 logger.error(f"Error updating database: {e}")
             
             await message.answer(f"✅ Posted album {artist_names} - {album_name}")
+        
+        elif item.get('item_type') == 'bandcamp':
+            # Для Bandcamp используем сохраненный URL и dummy данные
+            url = item.get('metadata', {}).get('url', 'unknown')
+            artist_name = "Artist" 
+            album_name = "Album"
+            release_date = datetime.now().strftime("%Y-%m-%d")
+            
+            # ТОЧНЫЙ ФОРМАТ ВЫВОДА ДЛЯ BANDCAMP
+            message_text = f"**{artist_name}**\n" \
+                           f"**{album_name}**\n" \
+                           f"{release_date}, Album, unknown tracks\n" \
+                           f"#bandcamp\n" \
+                           f"🎧 Listen on Bandcamp: {url}"
+            
+            # ПОСТИНГ В КАНАЛ
+            await bot.send_message(CHANNEL_ID, message_text, parse_mode="Markdown")
+            logger.info(f"Posted to channel {CHANNEL_ID}")
+            
+            # УДАЛЕНИЕ ИЗ ОЧЕРЕДИ
+            posting_queue.pop(0)
+            
+            # ОБНОВЛЕНИЕ В БАЗЕ (если таблица существует)
+            try:
+                supabase.table('post_queue').update({
+                    'posted': True,
+                    'posted_at': datetime.now().isoformat()
+                }).eq('item_id', item['item_id']).eq('item_type', 'bandcamp').execute()
+            except Exception as e:
+                logger.error(f"Error updating database: {e}")
+            
+            await message.answer(f"✅ Posted Bandcamp album")
+        
         else:
             await message.answer(f"❌ Unknown item type or Spotify not initialized")
             
