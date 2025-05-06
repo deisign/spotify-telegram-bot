@@ -79,7 +79,7 @@ Available commands:
 /post - Post next item in queue manually
 /check - Check for new releases
 
-You can also send Spotify links to add them to the queue."""
+You can also send Spotify or Bandcamp links to add them to the queue."""
     
     await message.answer(help_text)
 
@@ -129,12 +129,19 @@ async def cmd_post(message: Message):
             album = sp.album(item['item_id'])
             
             # ОРИГИНАЛЬНЫЙ ФОРМАТ ВЫВОДА
-            message_text = f"🎵 New Release Alert!\n\n" \
-                          f"🎤 Artist: {', '.join([artist['name'] for artist in album['artists']])}\n" \
-                          f"💿 Album: {album['name']}\n" \
-                          f"📅 Release Date: {album['release_date']}\n" \
-                          f"🔢 Tracks: {album['total_tracks']}\n\n" \
-                          f"🔗 Listen on Spotify: https://open.spotify.com/album/{item['item_id']}"
+            artist_names = ', '.join([artist['name'] for artist in album['artists']])
+            album_name = album['name']
+            release_date = album['release_date']
+            tracks = album['total_tracks']
+            
+            message_text = f"coma.fm\n\n" \
+                          f"🎵 New Release Alert!\n\n" \
+                          f"🎤 Artist: {artist_names}\n" \
+                          f"💿 Album: {album_name}\n" \
+                          f"📅 Release Date: {release_date}\n" \
+                          f"🔢 Tracks: {tracks}\n\n" \
+                          f"🔗 Listen on Spotify:\n" \
+                          f"https://open.spotify.com/album/{item['item_id']}"
             
             # ПОСТИНГ В КАНАЛ
             await bot.send_message(CHANNEL_ID, message_text)
@@ -152,8 +159,7 @@ async def cmd_post(message: Message):
             except Exception as e:
                 logger.error(f"Error updating database: {e}")
             
-            artist_name = ', '.join([artist['name'] for artist in album['artists']])
-            await message.answer(f"✅ Posted album {artist_name} - {album['name']}")
+            await message.answer(f"✅ Posted album {artist_names} - {album_name}")
         else:
             await message.answer(f"❌ Unknown item type or Spotify not initialized")
             
@@ -207,6 +213,17 @@ async def cmd_check(message: Message):
             result_text = f"Found {len(new_releases)} recent releases:\n\n"
             for rel in new_releases:
                 result_text += f"• {rel['artist']} - {rel['album']}\n"
+                # Add to queue
+                already_exists = any(item.get('item_id') == rel['id'] and item.get('item_type') == 'album' for item in posting_queue)
+                if not already_exists:
+                    posting_queue.append({
+                        'item_id': rel['id'],
+                        'item_type': 'album',
+                        'added_at': datetime.now().isoformat()
+                    })
+                    result_text += f"  ✅ Added to queue\n"
+                else:
+                    result_text += f"  ℹ️ Already in queue\n"
         else:
             result_text = "No recent releases found"
         
@@ -225,9 +242,9 @@ async def handle_links(message: Message):
         return
     
     # Check Spotify
-    match = re.search(r'https://open\.spotify\.com/album/([a-zA-Z0-9]+)', message.text)
-    if match:
-        album_id = match.group(1)
+    spotify_match = re.search(r'https://open\.spotify\.com/album/([a-zA-Z0-9]+)', message.text)
+    if spotify_match:
+        album_id = spotify_match.group(1)
         logger.info(f"Found Spotify album ID: {album_id}")
         
         # Check if already in queue
@@ -262,7 +279,7 @@ async def handle_links(message: Message):
                 except Exception as e:
                     logger.error(f"Error saving to database: {e}")
                 
-                await message.answer(f"✅ Added album {artist_name} - {album_name} to queue")
+                await message.answer(f"✅ Added album to queue")
                 return
             except Exception as e:
                 logger.error(f"Error validating album: {e}")
@@ -276,8 +293,45 @@ async def handle_links(message: Message):
                 'added_at': datetime.now().isoformat()
             })
             await message.answer(f"✅ Added album to queue")
+            return
     
-    logger.info("No Spotify link found")
+    # Check Bandcamp
+    bandcamp_match = re.search(r'https?://(?:.+\.)?bandcamp\.com/album/([^/]+)', message.text)
+    if bandcamp_match:
+        album_slug = bandcamp_match.group(1)
+        logger.info(f"Found Bandcamp album: {album_slug}")
+        
+        item_id = f"bandcamp_{album_slug}"
+        
+        # Check if already in queue
+        already_exists = any(item.get('item_id') == item_id for item in posting_queue)
+        
+        if already_exists:
+            await message.answer(f"ℹ️ Album already in queue")
+            return
+        
+        # Add to queue
+        posting_queue.append({
+            'item_id': item_id,
+            'item_type': 'bandcamp',
+            'added_at': datetime.now().isoformat(),
+            'metadata': {'url': message.text}
+        })
+        
+        # Try to save to database (if table exists)
+        try:
+            supabase.table('post_queue').insert({
+                'item_id': item_id,
+                'item_type': 'bandcamp',
+                'added_at': datetime.now().isoformat()
+            }).execute()
+        except Exception as e:
+            logger.error(f"Error saving to database: {e}")
+        
+        await message.answer(f"✅ Added Bandcamp album to queue")
+        return
+    
+    logger.info("No music link found")
 
 async def main():
     # Try to load queue from database if it exists
