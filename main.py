@@ -128,13 +128,13 @@ async def cmd_post(message: Message):
         if item.get('item_type') == 'album' and sp:
             album = sp.album(item['item_id'])
             
-            # ОРИГИНАЛЬНЫЙ ФОРМАТ ВЫВОДА
+            # ТОЧНЫЙ ФОРМАТ ВЫВОДА
             artist_names = ', '.join([artist['name'] for artist in album['artists']])
             album_name = album['name']
             release_date = album['release_date']
             tracks = album['total_tracks']
             
-            message_text = f"coma.fm\n\n" \
+            message_text = f"coma.fm\ncoma.fm\n\n" \
                           f"🎵 New Release Alert!\n\n" \
                           f"🎤 Artist: {artist_names}\n" \
                           f"💿 Album: {album_name}\n" \
@@ -241,7 +241,7 @@ async def handle_links(message: Message):
     if not message.text:
         return
     
-    # Check Spotify
+    # Проверка Spotify
     spotify_match = re.search(r'https://open\.spotify\.com/album/([a-zA-Z0-9]+)', message.text)
     if spotify_match:
         album_id = spotify_match.group(1)
@@ -295,8 +295,8 @@ async def handle_links(message: Message):
             await message.answer(f"✅ Added album to queue")
             return
     
-    # Check Bandcamp
-    bandcamp_match = re.search(r'https?://(?:.+\.)?bandcamp\.com/album/([^/]+)', message.text)
+    # Проверка Bandcamp - более общий паттерн 
+    bandcamp_match = re.search(r'https?://[^/]*?bandcamp\.com/album/([^/?#]+)', message.text)
     if bandcamp_match:
         album_slug = bandcamp_match.group(1)
         logger.info(f"Found Bandcamp album: {album_slug}")
