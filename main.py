@@ -43,14 +43,25 @@ try:
         scope="user-follow-read",
         cache_handler=None
     )
-    token_info = auth_manager.refresh_access_token(SPOTIFY_REFRESH_TOKEN)
-    sp = spotipy.Spotify(auth=token_info['access_token'])
 except Exception as e:
-    logger.error(f"Failed to initialize Spotify: {e}")
-    sp = None
+    logger.error(f"Failed to initialize SpotifyOAuth: {e}")
+    auth_manager = None
 
 # Queue
 posting_queue = []
+
+# Get a fresh Spotify client before each operation
+def get_spotify_client():
+    try:
+        if not auth_manager:
+            return None
+            
+        # Refresh the token before using
+        token_info = auth_manager.refresh_access_token(SPOTIFY_REFRESH_TOKEN)
+        return spotipy.Spotify(auth=token_info['access_token'])
+    except Exception as e:
+        logger.error(f"Error refreshing Spotify token: {e}")
+        return None
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
@@ -80,6 +91,9 @@ async def cmd_queue(message: Message):
         return
     
     queue_text = "📦 Post Queue:\n\n"
+    
+    sp = get_spotify_client()
+    
     for i, item in enumerate(posting_queue, 1):
         if item.get('item_type') == 'album' and sp:
             try:
@@ -87,7 +101,8 @@ async def cmd_queue(message: Message):
                 artist_name = ', '.join([artist['name'] for artist in album['artists']])
                 album_name = album['name']
                 queue_text += f"{i}. {artist_name} - {album_name}\n"
-            except:
+            except Exception as e:
+                logger.error(f"Error getting album: {e}")
                 queue_text += f"{i}. album ID: {item.get('item_id')}\n"
         else:
             queue_text += f"{i}. {item.get('item_type')} ID: {item.get('item_id')}\n"
@@ -102,8 +117,14 @@ async def cmd_post(message: Message):
         await message.answer("📭 Post queue is empty.")
         return
     
+    if not CHANNEL_ID:
+        await message.answer("❌ CHANNEL_ID not configured")
+        return
+    
     item = posting_queue[0]
     try:
+        sp = get_spotify_client()
+        
         if item.get('item_type') == 'album' and sp:
             album = sp.album(item['item_id'])
             
@@ -116,13 +137,8 @@ async def cmd_post(message: Message):
                           f"🔗 Listen on Spotify: https://open.spotify.com/album/{item['item_id']}"
             
             # ПОСТИНГ В КАНАЛ
-            if CHANNEL_ID:
-                await bot.send_message(CHANNEL_ID, message_text)
-                logger.info(f"Posted to channel {CHANNEL_ID}")
-            else:
-                logger.error("CHANNEL_ID not set")
-                await message.answer("CHANNEL_ID not configured")
-                return
+            await bot.send_message(CHANNEL_ID, message_text)
+            logger.info(f"Posted to channel {CHANNEL_ID}")
             
             # УДАЛЕНИЕ ИЗ ОЧЕРЕДИ
             posting_queue.pop(0)
@@ -150,6 +166,7 @@ async def cmd_check(message: Message):
     logger.info("Received /check command")
     await message.answer("🔍 Checking for new releases...")
     
+    sp = get_spotify_client()
     if not sp:
         await message.answer("❌ Spotify not initialized")
         return
@@ -220,25 +237,45 @@ async def handle_links(message: Message):
             await message.answer(f"ℹ️ Album already in queue")
             return
         
-        # Add to queue
-        posting_queue.append({
-            'item_id': album_id,
-            'item_type': 'album',
-            'added_at': datetime.now().isoformat()
-        })
-        
-        # Try to save to database (if table exists)
-        try:
-            supabase.table('post_queue').insert({
+        # Validate album exists
+        sp = get_spotify_client()
+        if sp:
+            try:
+                album = sp.album(album_id)
+                artist_name = ', '.join([artist['name'] for artist in album['artists']])
+                album_name = album['name']
+                
+                # Add to queue
+                posting_queue.append({
+                    'item_id': album_id,
+                    'item_type': 'album',
+                    'added_at': datetime.now().isoformat()
+                })
+                
+                # Try to save to database (if table exists)
+                try:
+                    supabase.table('post_queue').insert({
+                        'item_id': album_id,
+                        'item_type': 'album',
+                        'added_at': datetime.now().isoformat()
+                    }).execute()
+                except Exception as e:
+                    logger.error(f"Error saving to database: {e}")
+                
+                await message.answer(f"✅ Added album {artist_name} - {album_name} to queue")
+                return
+            except Exception as e:
+                logger.error(f"Error validating album: {e}")
+                await message.answer(f"❌ Error adding album: {str(e)}")
+                return
+        else:
+            # Add without validation
+            posting_queue.append({
                 'item_id': album_id,
                 'item_type': 'album',
                 'added_at': datetime.now().isoformat()
-            }).execute()
-        except Exception as e:
-            logger.error(f"Error saving to database: {e}")
-        
-        await message.answer(f"✅ Added album to queue")
-        return
+            })
+            await message.answer(f"✅ Added album to queue")
     
     logger.info("No Spotify link found")
 
