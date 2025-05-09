@@ -216,6 +216,7 @@ async def cmd_post(message: Message):
                 pass
             
             genre_tags = " ".join([f"#{genre.replace(' ', '')}" for genre in artist_genres]) if artist_genres else ""
+            album_url = f"https://open.spotify.com/album/{item['item_id']}"
             
             # Получаем ссылку на обложку
             cover_url = None
@@ -230,7 +231,7 @@ async def cmd_post(message: Message):
                            f"**{album_name}**\n" \
                            f"{release_date}, {album_type}, {tracks} tracks\n" \
                            f"{genre_tags}\n" \
-                           f"🎧 Listen on Spotify: https://open.spotify.com/album/{item['item_id']}"
+                           f"🎧 Listen on [Spotify]({album_url})"
             
             # ПОСТИНГ В КАНАЛ С ОБЛОЖКОЙ
             if cover_url:
@@ -281,7 +282,7 @@ async def cmd_post(message: Message):
                                f"**{album_name}**\n" \
                                f"{release_date}, {album_type}, {tracks} tracks\n" \
                                f"{genre_tags}\n" \
-                               f"🎧 Listen on Bandcamp: {url}"
+                               f"🎧 Listen on [Bandcamp]({url})"
                 
                 # ПОСТИНГ В КАНАЛ С ОБЛОЖКОЙ
                 if cover_url:
@@ -294,7 +295,7 @@ async def cmd_post(message: Message):
                                f"**Unknown Album**\n" \
                                f"{datetime.now().strftime('%Y-%m-%d')}, Album, unknown tracks\n" \
                                f"#bandcamp\n" \
-                               f"🎧 Listen on Bandcamp: {url}"
+                               f"🎧 Listen on [Bandcamp]({url})"
                 
                 await bot.send_message(CHANNEL_ID, message_text, parse_mode="Markdown")
                 
