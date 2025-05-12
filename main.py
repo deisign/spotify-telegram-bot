@@ -3,7 +3,8 @@ import logging
 import os
 import re
 import aiohttp
-from datetime import datetime
+import requests
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 
 import spotipy
@@ -65,67 +66,134 @@ def get_spotify_client():
         logger.error(f"Error refreshing Spotify token: {e}")
         return None
 
-# Function to scrape Bandcamp album info
+# Improved function to scrape Bandcamp album info
 async def scrape_bandcamp(url):
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
-                if response.status != 200:
-                    return None
-                
-                html = await response.text()
-                soup = BeautifulSoup(html, 'html.parser')
-                
-                # Extract data
-                result = {}
-                
-                # Artist name
-                artist_elem = soup.select_one('span[itemprop="byArtist"] a')
-                if artist_elem:
-                    result['artist'] = artist_elem.text.strip()
-                else:
-                    result['artist'] = "Unknown Artist"
-                
-                # Album name
-                album_elem = soup.select_one('h2[itemprop="name"]')
-                if album_elem:
-                    result['album'] = album_elem.text.strip()
-                else:
-                    result['album'] = "Unknown Album"
-                
-                # Release date
-                date_elem = soup.select_one('meta[itemprop="datePublished"]')
-                if date_elem and 'content' in date_elem.attrs:
-                    result['date'] = date_elem['content']
-                else:
-                    result['date'] = datetime.now().strftime("%Y-%m-%d")
-                
-                # Track count
-                tracks = soup.select('table[itemprop="tracks"] tr')
-                result['tracks'] = len(tracks) if tracks else "unknown"
-                
-                # Cover image
-                img_elem = soup.select_one('#tralbumArt img')
-                if img_elem and 'src' in img_elem.attrs:
-                    result['cover_url'] = img_elem['src']
-                
-                # Type (Album or Single)
-                result['type'] = "Album"  # Default to Album
-                
-                # Tags
-                tags = []
-                tags_elem = soup.select('.tag')
-                for tag in tags_elem[:3]:  # Get up to 3 tags
-                    tag_text = tag.text.strip()
-                    if tag_text:
-                        tags.append(tag_text)
-                result['tags'] = tags
-                
-                return result
+        # Синхронный запрос, потому что некоторые Bandcamp страницы не работают с aiohttp
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            return None
+            
+        html = response.text
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # Extract data
+        result = {}
+        
+        # Artist name - попробуем несколько селекторов
+        artist_name = None
+        selectors = [
+            'span[itemprop="byArtist"] a',
+            '.albumTitle span a',
+            '#name-section h3 span a',
+            '.band-name a'
+        ]
+        
+        for selector in selectors:
+            artist_elem = soup.select_one(selector)
+            if artist_elem:
+                artist_name = artist_elem.text.strip()
+                break
+        
+        if not artist_name:
+            artist_name = "Unknown Artist"
+        
+        result['artist'] = artist_name
+        
+        # Album name - попробуем несколько селекторов
+        album_name = None
+        selectors = [
+            'h2[itemprop="name"]',
+            '.trackTitle',
+            '.title'
+        ]
+        
+        for selector in selectors:
+            album_elem = soup.select_one(selector)
+            if album_elem:
+                album_name = album_elem.text.strip()
+                break
+        
+        if not album_name:
+            album_name = "Unknown Album"
+        
+        result['album'] = album_name
+        
+        # Release date - попробуем несколько способов
+        release_date = None
+        
+        # Вариант 1: meta-теги
+        date_elem = soup.select_one('meta[itemprop="datePublished"]')
+        if date_elem and 'content' in date_elem.attrs:
+            release_date = date_elem['content']
+        
+        # Вариант 2: текст выпуска
+        if not release_date:
+            release_text = soup.find(string=re.compile(r'released', re.IGNORECASE))
+            if release_text:
+                date_match = re.search(r'released\s+(\w+\s+\d+,\s+\d{4})', release_text, re.IGNORECASE)
+                if date_match:
+                    release_date = date_match.group(1)
+        
+        if not release_date:
+            release_date = datetime.now().strftime("%Y-%m-%d")
+        
+        result['date'] = release_date
+        
+        # Track count - попробуем несколько селекторов
+        tracks = 0
+        selectors = [
+            'table[itemprop="tracks"] tr',
+            '.track_list tr',
+            '.track_row_view'
+        ]
+        
+        for selector in selectors:
+            track_elems = soup.select(selector)
+            if track_elems:
+                tracks = len(track_elems)
+                break
+        
+        result['tracks'] = tracks if tracks else "unknown"
+        
+        # Cover image - попробуем несколько селекторов
+        cover_url = None
+        selectors = [
+            '#tralbumArt img',
+            '.popupImage',
+            'img.album_art'
+        ]
+        
+        for selector in selectors:
+            img_elem = soup.select_one(selector)
+            if img_elem and 'src' in img_elem.attrs:
+                cover_url = img_elem['src']
+                break
+        
+        if cover_url:
+            result['cover_url'] = cover_url
+        
+        # Type (Album or Single)
+        result['type'] = "Album"  # Default to Album
+        
+        # Tags - используем теги alt в обложке или любые другие
+        tags = []
+        tags_elem = soup.select('.tag')
+        for tag in tags_elem[:3]:  # Get up to 3 tags
+            tag_text = tag.text.strip()
+            if tag_text:
+                tags.append(tag_text)
+        
+        if not tags:
+            tags = ['bandcamp']
+        
+        result['tags'] = tags
+        
+        return result
     except Exception as e:
         logger.error(f"Error scraping Bandcamp: {e}")
         return None
@@ -226,12 +294,13 @@ async def cmd_post(message: Message):
             except:
                 pass
             
-            # ТОЧНЫЙ ФОРМАТ ВЫВОДА ДЛЯ SPOTIFY
-            message_text = f"**{artist_names}**\n" \
-                           f"**{album_name}**\n" \
-                           f"{release_date}, {album_type}, {tracks} tracks\n" \
-                           f"{genre_tags}\n" \
-                           f"🎧 Listen on [Spotify]({album_url})"
+            # ТОЧНЫЙ ФОРМАТ ВЫВОДА ДЛЯ SPOTIFY (с форматированием HTML)
+            message_text = f"coma.fm\n" \
+                          f"{artist_names}\n" \
+                          f"{album_name}\n" \
+                          f"{release_date}, {album_type}, {tracks} tracks\n" \
+                          f"{genre_tags}\n" \
+                          f"🎧 Listen on [Spotify]({album_url})"
             
             # ПОСТИНГ В КАНАЛ С ОБЛОЖКОЙ
             if cover_url:
@@ -277,12 +346,13 @@ async def cmd_post(message: Message):
                 
                 genre_tags = " ".join([f"#{tag.replace(' ', '')}" for tag in tags])
                 
-                # ТОЧНЫЙ ФОРМАТ ВЫВОДА ДЛЯ BANDCAMP
-                message_text = f"**{artist_name}**\n" \
-                               f"**{album_name}**\n" \
-                               f"{release_date}, {album_type}, {tracks} tracks\n" \
-                               f"{genre_tags}\n" \
-                               f"🎧 Listen on [Bandcamp]({url})"
+                # ТОЧНЫЙ ФОРМАТ ВЫВОДА ДЛЯ BANDCAMP (без форматирования оригинального текста)
+                message_text = f"coma.fm\n" \
+                              f"Bandcamp Album\n" \
+                              f"{album_name}\n" \
+                              f"{release_date}, {album_type}, {tracks} tracks\n" \
+                              f"#bandcamp\n" \
+                              f"🎧 Listen on [Bandcamp]({url})"
                 
                 # ПОСТИНГ В КАНАЛ С ОБЛОЖКОЙ
                 if cover_url:
@@ -291,11 +361,12 @@ async def cmd_post(message: Message):
                     await bot.send_message(CHANNEL_ID, message_text, parse_mode="Markdown")
             else:
                 # Fallback if scraping failed
-                message_text = f"**Bandcamp Album**\n" \
-                               f"**Unknown Album**\n" \
-                               f"{datetime.now().strftime('%Y-%m-%d')}, Album, unknown tracks\n" \
-                               f"#bandcamp\n" \
-                               f"🎧 Listen on [Bandcamp]({url})"
+                message_text = f"coma.fm\n" \
+                              f"Bandcamp Album\n" \
+                              f"Unknown Album\n" \
+                              f"{datetime.now().strftime('%Y-%m-%d')}, Album, unknown tracks\n" \
+                              f"#bandcamp\n" \
+                              f"🎧 Listen on [Bandcamp]({url})"
                 
                 await bot.send_message(CHANNEL_ID, message_text, parse_mode="Markdown")
                 
@@ -333,52 +404,115 @@ async def cmd_check(message: Message):
         return
     
     try:
-        # Get followed artists
-        results = sp.current_user_followed_artists(limit=10)
-        artists = results['artists']['items']
+        # Get followed artists - использовать пагинацию чтобы получить ВСЕ артисты
+        all_artists = []
+        results = sp.current_user_followed_artists(limit=50)
         
-        if not artists:
+        artists = results['artists']['items']
+        all_artists.extend(artists)
+        
+        # Получаем все страницы артистов
+        while results['artists']['next']:
+            results = sp.next(results['artists'])
+            all_artists.extend(results['artists']['items'])
+        
+        logger.info(f"Found {len(all_artists)} followed artists")
+        
+        if not all_artists:
             await message.answer("No followed artists found")
             return
         
+        # Получаем days_back из базы данных
+        days_back = 3
+        try:
+            result = supabase.table('bot_status').select('value').eq('key', 'release_days_threshold').execute()
+            if result.data:
+                days_back = int(result.data[0]['value'])
+        except:
+            pass
+        
+        cutoff_date = datetime.now() - timedelta(days=days_back)
+        
         # Check for new releases
         new_releases = []
-        for artist in artists:
-            albums = sp.artist_albums(artist['id'], album_type='album,single', limit=5)
-            for album in albums['items']:
-                release_date = album['release_date']
-                if '-' in release_date:  # Has at least month
-                    try:
-                        release_datetime = datetime.strptime(release_date, '%Y-%m-%d')
-                    except:
-                        try:
-                            release_datetime = datetime.strptime(release_date, '%Y-%m')
-                        except:
-                            continue
+        new_releases_added = 0
+        
+        # Проверяем только первые 20 артистов, чтобы не тратить лимиты API
+        for artist in all_artists[:20]:
+            try:
+                artist_id = artist['id']
+                artist_name = artist['name']
+                
+                albums = sp.artist_albums(artist_id, album_type='album,single', country='US', limit=5)
+                
+                for album in albums['items']:
+                    album_id = album['id']
+                    album_name = album['name']
+                    release_date = album['release_date']
                     
-                    # Check if recent (within 3 days)
-                    if (datetime.now() - release_datetime).days <= 3:
+                    # Parse release date
+                    try:
+                        if len(release_date) == 4:  # Year only
+                            release_datetime = datetime.strptime(release_date, '%Y')
+                        elif len(release_date) == 7:  # Year-month
+                            release_datetime = datetime.strptime(release_date, '%Y-%m')
+                        else:  # Full date
+                            release_datetime = datetime.strptime(release_date, '%Y-%m-%d')
+                    except:
+                        continue
+                    
+                    # Check if within threshold
+                    if release_datetime >= cutoff_date:
+                        logger.info(f"Found recent release: {artist_name} - {album_name} ({release_date})")
+                        
+                        # Add to result for user
                         new_releases.append({
-                            'artist': artist['name'],
-                            'album': album['name'],
-                            'id': album['id']
+                            'artist': artist_name,
+                            'album': album_name,
+                            'id': album_id
                         })
+                        
+                        # Check if already in queue
+                        already_exists = any(
+                            item.get('item_id') == album_id and item.get('item_type') == 'album' 
+                            for item in posting_queue
+                        )
+                        
+                        if not already_exists:
+                            # Add to queue
+                            posting_queue.append({
+                                'item_id': album_id,
+                                'item_type': 'album',
+                                'added_at': datetime.now().isoformat()
+                            })
+                            
+                            # Save to database
+                            try:
+                                supabase.table('post_queue').insert({
+                                    'item_id': album_id,
+                                    'item_type': 'album',
+                                    'added_at': datetime.now().isoformat()
+                                }).execute()
+                                
+                                new_releases_added += 1
+                            except Exception as e:
+                                logger.error(f"Error saving to database: {e}")
+            except Exception as e:
+                logger.error(f"Error checking artist {artist['name']}: {e}")
+        
+        # Update last check time
+        try:
+            supabase.table('bot_status').upsert({
+                'key': 'last_check',
+                'value': datetime.now().isoformat()
+            }).execute()
+        except:
+            pass
         
         if new_releases:
-            result_text = f"Found {len(new_releases)} recent releases:\n\n"
+            result_text = f"Found {len(new_releases)} recent releases, added {new_releases_added} to queue:\n\n"
             for rel in new_releases:
                 result_text += f"• {rel['artist']} - {rel['album']}\n"
-                # Add to queue
-                already_exists = any(item.get('item_id') == rel['id'] and item.get('item_type') == 'album' for item in posting_queue)
-                if not already_exists:
-                    posting_queue.append({
-                        'item_id': rel['id'],
-                        'item_type': 'album',
-                        'added_at': datetime.now().isoformat()
-                    })
-                    result_text += f"  ✅ Added to queue\n"
-                else:
-                    result_text += f"  ℹ️ Already in queue\n"
         else:
             result_text = "No recent releases found"
         
