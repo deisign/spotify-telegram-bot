@@ -18,7 +18,9 @@ from aiogram.exceptions import TelegramConflictError
 from spotipy.oauth2 import SpotifyOAuth
 from supabase import create_client, Client
 
-# ... [весь ваш старый код до функции main()] ...
+# Остальной код оставляем без изменений...
+
+# Добавляем эти новые функции перед main()
 
 async def on_startup(dispatcher):
     # Удаляем веб-хук перед запуском бота
@@ -59,37 +61,10 @@ async def update_bot_status():
         
         await asyncio.sleep(30)  # Обновляем каждые 30 секунд
 
+# Теперь модифицируем main(), но НЕ переписываем его полностью
 async def main():
     # Регистрируем обработчики сигналов
     register_shutdown_handlers()
-    
-    # Проверяем, есть ли предыдущие экземпляры в базе данных
-    try:
-        instance_check_key = 'instance_running'
-        # Получаем текущее время
-        current_time = datetime.now()
-        
-        # Проверяем запись о предыдущем экземпляре
-        result = supabase.table('bot_status').select('value').eq('key', instance_check_key).execute()
-        
-        if result.data:
-            last_timestamp_str = result.data[0]['value']
-            last_timestamp = datetime.fromisoformat(last_timestamp_str)
-            
-            # Если прошло менее 2 минут с момента запуска предыдущего экземпляра,
-            # ждем дополнительное время
-            if (current_time - last_timestamp).total_seconds() < 120:
-                logger.info("Another instance might be running. Waiting 10 seconds...")
-                await asyncio.sleep(10)
-        
-        # Обновляем или создаем запись о текущем экземпляре
-        supabase.table('bot_status').upsert({
-            'key': instance_check_key,
-            'value': current_time.isoformat()
-        }).execute()
-        
-    except Exception as e:
-        logger.error(f"Error checking for other instances: {e}")
     
     # Try to load queue from database if it exists
     try:
@@ -134,6 +109,3 @@ async def main():
         except Exception as retry_error:
             logger.error(f"Failed to restart after conflict: {retry_error}")
             sys.exit(1)
-
-if __name__ == "__main__":
-    asyncio.run(main())
