@@ -3,7 +3,6 @@ import logging
 import os
 import re
 import json
-import aiohttp
 import requests
 import signal
 import sys
@@ -11,7 +10,7 @@ from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 
 import spotipy
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, Router
 from aiogram.types import Message
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -40,6 +39,9 @@ CHECK_INTERVAL_HOURS = int(os.getenv("CHECK_INTERVAL_HOURS", "12"))
 # Initialize services
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+router = Router()
+dp.include_router(router)
+
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Spotify setup
@@ -111,7 +113,7 @@ async def scrape_bandcamp(url):
                 data = json.loads(data_json_str)
                 
                 # Логируем весь найденный JSON для отладки
-                logger.info(f"Found data-tralbum JSON: {data}")
+                logger.info(f"Found data-tralbum JSON data")
                 
                 # Извлекаем данные об исполнителе
                 if 'artist' in data:
@@ -279,7 +281,7 @@ async def scrape_bandcamp(url):
         return None
 
 # Функции для корректного завершения
-async def on_startup(dispatcher):
+async def on_startup():
     # Удаляем веб-хук перед запуском бота
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Bot started, webhook deleted")
@@ -288,7 +290,7 @@ async def on_startup(dispatcher):
     bot_info = await bot.get_me()
     logger.info(f"Connected as @{bot_info.username}")
 
-async def on_shutdown(dispatcher):
+async def on_shutdown():
     logger.info("Shutting down bot...")
     await bot.session.close()
 
@@ -318,12 +320,12 @@ async def update_bot_status():
         await asyncio.sleep(30)
 
 # Обработчики команд
-@dp.message(Command("start"))
+@router.message(Command("start"))
 async def cmd_start(message: Message):
     logger.info("Received /start command")
     await message.answer("Bot is working! Send a Spotify link or use /help")
 
-@dp.message(Command("help"))
+@router.message(Command("help"))
 async def cmd_help(message: Message):
     logger.info("Received /help command")
     help_text = """🎵 Spotify Release Tracker Bot
@@ -339,7 +341,7 @@ You can also send Spotify or Bandcamp links to add them to the queue."""
     
     await message.answer(help_text)
 
-@dp.message(Command("debug"))
+@router.message(Command("debug"))
 async def cmd_debug(message: Message):
     logger.info("Received /debug command")
     
@@ -362,7 +364,7 @@ async def cmd_debug(message: Message):
     else:
         await message.answer("❌ Only Bandcamp URLs are supported for debug")
 
-@dp.message(Command("queue"))
+@router.message(Command("queue"))
 async def cmd_queue(message: Message):
     logger.info("Received /queue command")
     if not posting_queue:
@@ -392,7 +394,7 @@ async def cmd_queue(message: Message):
     
     await message.answer(queue_text)
 
-@dp.message(Command("post"))
+@router.message(Command("post"))
 async def cmd_post(message: Message):
     logger.info("Received /post command")
     
@@ -438,7 +440,7 @@ async def cmd_post(message: Message):
             except:
                 pass
             
-            # ТОЧНЫЙ ФОРМАТ ВЫВОДА ДЛЯ SPOTIFY (с форматированием HTML)
+            # ТОЧНЫЙ ФОРМАТ ВЫВОДА ДЛЯ SPOTIFY
             message_text = f"coma.fm\n" \
                           f"{artist_names}\n" \
                           f"{album_name}\n" \
@@ -579,7 +581,285 @@ async def cmd_post(message: Message):
         logger.error(f"Error in post command: {e}")
         await message.answer(f"❌ Error posting: {str(e)}")
 
-@dp.message(Command("check"))
+@router.message(Command("check"))
 async def cmd_check(message: Message):
     logger.info("Received /check command")
     await message.answer("🔍 Checking for new releases...")
+    
+    sp = get_spotify_client()
+    if not sp:
+        await message.answer("❌ Spotify not initialized")
+        return
+    
+    try:
+        # Get followed artists - использовать пагинацию чтобы получить ВСЕ артисты
+        all_artists = []
+        results = sp.current_user_followed_artists(limit=50)
+        
+        artists = results['artists']['items']
+        all_artists.extend(artists)
+        
+        # Получаем все страницы артистов
+        while results['artists']['next']:
+            results = sp.next(results['artists'])
+            all_artists.extend(results['artists']['items'])
+        
+        logger.info(f"Found {len(all_artists)} followed artists")
+        
+        if not all_artists:
+            await message.answer("No followed artists found")
+            return
+        
+        # Получаем days_back из базы данных
+        days_back = 3
+        try:
+            result = supabase.table('bot_status').select('value').eq('key', 'release_days_threshold').execute()
+            if result.data:
+                days_back = int(result.data[0]['value'])
+        except:
+            pass
+        
+        cutoff_date = datetime.now() - timedelta(days=days_back)
+        
+        # Check for new releases
+        new_releases = []
+        new_releases_added = 0
+        
+        # Проверяем только первые 20 артистов, чтобы не тратить лимиты API
+        for artist in all_artists[:20]:
+            try:
+                artist_id = artist['id']
+                artist_name = artist['name']
+                
+                albums = sp.artist_albums(artist_id, album_type='album,single', country='US', limit=5)
+                
+                for album in albums['items']:
+                    album_id = album['id']
+                    album_name = album['name']
+                    release_date = album['release_date']
+                    
+                    # Parse release date
+                    try:
+                        if len(release_date) == 4:  # Year only
+                            release_datetime = datetime.strptime(release_date, '%Y')
+                        elif len(release_date) == 7:  # Year-month
+                            release_datetime = datetime.strptime(release_date, '%Y-%m')
+                        else:  # Full date
+                            release_datetime = datetime.strptime(release_date, '%Y-%m-%d')
+                    except:
+                        continue
+                    
+                    # Check if within threshold
+                    if release_datetime >= cutoff_date:
+                        logger.info(f"Found recent release: {artist_name} - {album_name} ({release_date})")
+                        
+                        # Add to result for user
+                        new_releases.append({
+                            'artist': artist_name,
+                            'album': album_name,
+                            'id': album_id
+                        })
+                        
+                        # Check if already in queue
+                        already_exists = any(
+                            item.get('item_id') == album_id and item.get('item_type') == 'album' 
+                            for item in posting_queue
+                        )
+                        
+                        if not already_exists:
+                            # Add to queue
+                            posting_queue.append({
+                                'item_id': album_id,
+                                'item_type': 'album',
+                                'added_at': datetime.now().isoformat()
+                            })
+                            
+                            # Save to database
+                            try:
+                                supabase.table('post_queue').insert({
+                                    'item_id': album_id,
+                                    'item_type': 'album',
+                                    'added_at': datetime.now().isoformat()
+                                }).execute()
+                                
+                                new_releases_added += 1
+                            except Exception as e:
+                                logger.error(f"Error saving to database: {e}")
+            except Exception as e:
+                logger.error(f"Error checking artist {artist['name']}: {e}")
+        
+        # Update last check time
+        try:
+            supabase.table('bot_status').upsert({
+                'key': 'last_check',
+                'value': datetime.now().isoformat()
+            }).execute()
+        except:
+            pass
+        
+        if new_releases:
+            result_text = f"Found {len(new_releases)} recent releases, added {new_releases_added} to queue:\n\n"
+            for rel in new_releases:
+                result_text += f"• {rel['artist']} - {rel['album']}\n"
+        else:
+            result_text = "No recent releases found"
+        
+        await message.answer(result_text)
+        
+    except Exception as e:
+        logger.error(f"Error checking releases: {e}")
+        await message.answer(f"❌ Error: {str(e)}")
+
+# ЭТОТ ОБРАБОТЧИК ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ
+@router.message()
+async def handle_links(message: Message):
+    try:
+        logger.info(f"Received message: {message.text}")
+        
+        if not message.text:
+            return
+        
+        # Проверка Spotify
+        spotify_match = re.search(r'https://open\.spotify\.com/album/([a-zA-Z0-9]+)', message.text)
+        if spotify_match:
+            album_id = spotify_match.group(1)
+            logger.info(f"Found Spotify album ID: {album_id}")
+            
+            # Check if already in queue
+            already_exists = any(item.get('item_id') == album_id and item.get('item_type') == 'album' for item in posting_queue)
+            
+            if already_exists:
+                await message.answer(f"ℹ️ Album already in queue")
+                return
+            
+            # Validate album exists
+            sp = get_spotify_client()
+            if sp:
+                try:
+                    album = sp.album(album_id)
+                    artist_name = ', '.join([artist['name'] for artist in album['artists']])
+                    album_name = album['name']
+                    
+                    # Add to queue
+                    posting_queue.append({
+                        'item_id': album_id,
+                        'item_type': 'album',
+                        'added_at': datetime.now().isoformat()
+                    })
+                    
+                    # Try to save to database (if table exists)
+                    try:
+                        supabase.table('post_queue').insert({
+                            'item_id': album_id,
+                            'item_type': 'album',
+                            'added_at': datetime.now().isoformat()
+                        }).execute()
+                    except Exception as e:
+                        logger.error(f"Error saving to database: {e}")
+                    
+                    await message.answer(f"✅ Added album to queue: {artist_name} - {album_name}")
+                    return
+                except Exception as e:
+                    logger.error(f"Error validating album: {e}")
+                    await message.answer(f"❌ Error adding album: {str(e)}")
+                    return
+            else:
+                # Add without validation
+                posting_queue.append({
+                    'item_id': album_id,
+                    'item_type': 'album',
+                    'added_at': datetime.now().isoformat()
+                })
+                await message.answer(f"✅ Added Spotify album to queue (without validation)")
+                return
+        
+        # Проверка Bandcamp - более общий паттерн 
+        bandcamp_match = re.search(r'https?://[^/]*?bandcamp\.com/album/([^/?#]+)', message.text)
+        if bandcamp_match:
+            album_slug = bandcamp_match.group(1)
+            logger.info(f"Found Bandcamp album: {album_slug}")
+            
+            item_id = f"bandcamp_{album_slug}"
+            
+            # Check if already in queue
+            already_exists = any(item.get('item_id') == item_id for item in posting_queue)
+            
+            if already_exists:
+                await message.answer(f"ℹ️ Album already in queue")
+                return
+            
+            # Add to queue
+            posting_queue.append({
+                'item_id': item_id,
+                'item_type': 'bandcamp',
+                'added_at': datetime.now().isoformat(),
+                'metadata': {'url': message.text}
+            })
+            
+            # Try to save to database (if table exists)
+            try:
+                supabase.table('post_queue').insert({
+                    'item_id': item_id,
+                    'item_type': 'bandcamp',
+                    'added_at': datetime.now().isoformat()
+                }).execute()
+            except Exception as e:
+                logger.error(f"Error saving to database: {e}")
+            
+            await message.answer(f"✅ Added Bandcamp album to queue: {message.text}")
+            return
+        
+        # Если не найдена ни одна ссылка
+        logger.info("No music link found")
+    except Exception as e:
+        logger.error(f"Error in message handler: {e}", exc_info=True)
+        await message.answer(f"❌ Error processing message: {str(e)}")
+
+async def main():
+    # Логируем старт
+    logger.info("Starting bot application...")
+    
+    # Регистрируем обработчики сигналов
+    register_shutdown_handlers()
+    
+    # Пробуем загрузить очередь из базы данных
+    try:
+        result = supabase.table('post_queue').select('*').eq('posted', False).order('id').execute()
+        global posting_queue
+        posting_queue = result.data if result.data else []
+        logger.info(f"Loaded {len(posting_queue)} items from queue")
+    except Exception as e:
+        logger.error(f"Error loading queue: {e}")
+        logger.info("Starting with empty queue")
+    
+    # Запускаем задачу обновления статуса
+    asyncio.create_task(update_bot_status())
+    
+    # Сбрасываем webhook перед запуском
+    try:
+        await on_startup()
+    except Exception as e:
+        logger.error(f"Error in startup: {e}")
+    
+    # Запускаем поллинг
+    try:
+        logger.info("Starting polling...")
+        await dp.start_polling(bot)
+    except TelegramConflictError as e:
+        logger.error(f"Telegram conflict error: {e}")
+        # Ждем перед повторной попыткой
+        await asyncio.sleep(10)
+        
+        # Пробуем снова
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            await dp.start_polling(bot)
+        except Exception as retry_e:
+            logger.error(f"Failed to restart after conflict: {retry_e}")
+            sys.exit(1)
+    except Exception as e:
+        logger.error(f"Error starting bot: {e}", exc_info=True)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    asyncio.run(main())
