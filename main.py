@@ -76,27 +76,20 @@ async def scrape_bandcamp(url):
     try:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0',
+            'Referer': 'https://bandcamp.com/',
+            'DNT': '1',
         }
         
         logger.info(f"Scraping Bandcamp URL: {url}")
         
-        # Синхронный запрос с более полными заголовками
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code != 200:
             logger.error(f"Failed to fetch Bandcamp page: {response.status_code}")
             return None
             
         html = response.text
-        logger.debug(f"Got HTML response of length: {len(html)} bytes")
         
         # Сохраняем HTML для отладки
         try:
@@ -106,347 +99,183 @@ async def scrape_bandcamp(url):
         except Exception as e:
             logger.error(f"Error saving debug HTML: {e}")
         
-        soup = BeautifulSoup(html, 'html.parser')
-        
-        # Extract data
+        # Ищем данные в JSON в исходном коде страницы
         result = {}
         
-        # Сначала проверяем, содержит ли страница необходимые элементы
-        page_title = soup.title.text if soup.title else "No Title"
-        logger.info(f"Bandcamp page title: {page_title}")
-        
-        # Artist name - расширенный набор селекторов
-        artist_selectors = [
-            'span[itemprop="byArtist"] a',
-            '.albumTitle span a',
-            '#name-section h3 span a',
-            '.band-name a',
-            'h3.band-name',
-            '.creator',
-            'meta[property="og:site_name"]'
-        ]
-        
-        artist_name = None
-        for selector in artist_selectors:
+        # Поиск JSON данных напрямую в скрипте
+        data_json_match = re.search(r'data-tralbum="({.*?})"', html)
+        if data_json_match:
             try:
-                if selector.startswith('meta'):
-                    artist_elem = soup.select_one(selector)
-                    if artist_elem and 'content' in artist_elem.attrs:
-                        artist_name = artist_elem['content'].strip()
-                        logger.info(f"Found artist name via meta: {artist_name}")
-                        break
+                # Подготавливаем JSON, заменяя экранированные кавычки
+                data_json_str = data_json_match.group(1).replace('&quot;', '"')
+                data = json.loads(data_json_str)
+                
+                # Логируем весь найденный JSON для отладки
+                logger.info(f"Found data-tralbum JSON: {data}")
+                
+                # Извлекаем данные об исполнителе
+                if 'artist' in data:
+                    result['artist'] = data['artist']
+                    
+                # Извлекаем название альбома
+                if 'current' in data and 'title' in data['current']:
+                    result['album'] = data['current']['title']
+                elif 'title' in data:
+                    result['album'] = data['title']
+                    
+                # Извлекаем дату выпуска
+                if 'album_release_date' in data:
+                    result['date'] = data['album_release_date']
+                    
+                # Извлекаем трэки
+                if 'trackinfo' in data:
+                    result['tracks'] = len(data['trackinfo'])
+                    
+                # Извлекаем URL обложки
+                if 'art_id' in data:
+                    art_id = data['art_id']
+                    result['cover_url'] = f"https://f4.bcbits.com/img/a{art_id}_10.jpg"
+                
+                # Тип релиза
+                result['type'] = "Album"
+                
+                # Теги/жанры
+                if 'tags' in data and isinstance(data['tags'], list):
+                    result['tags'] = [tag.get('name', '') for tag in data['tags'][:3]]
+                elif 'genre' in data:
+                    result['tags'] = [data['genre']]
                 else:
-                    artist_elem = soup.select_one(selector)
-                    if artist_elem:
-                        artist_name = artist_elem.text.strip()
-                        logger.info(f"Found artist name via selector {selector}: {artist_name}")
-                        break
+                    result['tags'] = ['bandcamp']
+                    
+                logger.info(f"Successfully parsed data-tralbum JSON, result: {result}")
+                return result
+                
             except Exception as e:
-                logger.error(f"Error with artist selector {selector}: {e}")
+                logger.error(f"Error parsing data-tralbum JSON: {e}", exc_info=True)
         
-        # Проверяем также данные в JSON структуре страницы
+        # Поиск альтернативного формата JSON данных
         try:
-            json_ld = soup.find('script', type='application/ld+json')
-            if json_ld:
-                data = json.loads(json_ld.string)
-                if not artist_name and 'byArtist' in data:
-                    artist_name = data['byArtist']['name']
-                    logger.info(f"Found artist name via JSON-LD: {artist_name}")
+            json_match = re.search(r'var TralbumData = ({.*?});', html, re.DOTALL)
+            if json_match:
+                data_str = json_match.group(1)
+                # Исправляем некоторые особенности JavaScript, чтобы работало с JSON
+                data_str = re.sub(r'(\w+):', r'"\1":', data_str)
+                data_str = re.sub(r',\s*}', '}', data_str)
+                data_str = re.sub(r',\s*]', ']', data_str)
+                data_str = data_str.replace('\'', '"')
+                
+                try:
+                    data = json.loads(data_str)
+                    logger.info(f"Found TralbumData, extracted info")
+                    
+                    # Извлекаем данные
+                    if 'artist' in data:
+                        result['artist'] = data['artist']
+                    
+                    if 'current' in data and 'title' in data['current']:
+                        result['album'] = data['current']['title']
+                    elif 'album_title' in data:
+                        result['album'] = data['album_title']
+                        
+                    if 'album_release_date' in data:
+                        result['date'] = data['album_release_date']
+                        
+                    if 'trackinfo' in data:
+                        result['tracks'] = len(data['trackinfo'])
+                        
+                    if 'artFullsizeUrl' in data:
+                        result['cover_url'] = data['artFullsizeUrl']
+                        
+                    result['type'] = "Album"
+                    
+                    # Теги/жанры
+                    if 'genres' in data and isinstance(data['genres'], list):
+                        result['tags'] = data['genres'][:3]
+                    else:
+                        result['tags'] = ['bandcamp']
+                        
+                    logger.info(f"Successfully parsed TralbumData, result: {result}")
+                    return result
+                except Exception as e:
+                    logger.error(f"Error parsing TralbumData JSON: {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"Error parsing JSON-LD: {e}")
+            logger.error(f"Error with TralbumData regex: {e}", exc_info=True)
         
-        if not artist_name:
-            artist_name = "Unknown Artist"
-            logger.warning("Could not find artist name")
+        # Если не нашли JSON, пробуем альтернативный метод
+        # Поиск данных через Open Graph мета-теги
+        og_title = re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', html)
+        og_site_name = re.search(r'<meta\s+property="og:site_name"\s+content="([^"]+)"', html)
         
-        result['artist'] = artist_name
-        
-        # Album name - расширенный набор селекторов
-        album_selectors = [
-            'h2[itemprop="name"]',
-            '.trackTitle',
-            '.title',
-            '#name-section .trackTitle',
-            'meta[property="og:title"]',
-            'meta[name="title"]',
-            '.tralbumData .title',
-            '.title-section .title'
-        ]
-        
-        album_name = None
-        for selector in album_selectors:
-            try:
-                if selector.startswith('meta'):
-                    album_elem = soup.select_one(selector)
-                    if album_elem and 'content' in album_elem.attrs:
-                        album_name = album_elem['content'].strip()
-                        logger.info(f"Found album name via meta: {album_name}")
-                        break
+        if og_title and og_site_name:
+            title = og_title.group(1)
+            artist = og_site_name.group(1)
+            
+            # Поиск количества треков через регулярку
+            track_count = len(re.findall(r'class="track-title"', html))
+            if track_count == 0:
+                track_count_match = re.search(r'(\d+) track album', html)
+                if track_count_match:
+                    track_count = track_count_match.group(1)
                 else:
-                    album_elem = soup.select_one(selector)
-                    if album_elem:
-                        album_name = album_elem.text.strip()
-                        logger.info(f"Found album name via selector {selector}: {album_name}")
-                        break
-            except Exception as e:
-                logger.error(f"Error with album selector {selector}: {e}")
+                    track_count = "unknown"
+            
+            # Поиск даты выпуска
+            release_date_match = re.search(r'released\s+([A-Za-z]+\s+\d{1,2},\s+\d{4})', html)
+            if release_date_match:
+                release_date = release_date_match.group(1)
+            else:
+                release_date = datetime.now().strftime("%Y-%m-%d")
+                
+            # Поиск URL обложки
+            cover_match = re.search(r'<link\s+rel="image_src"\s+href="([^"]+)"', html)
+            if cover_match:
+                cover_url = cover_match.group(1)
+            else:
+                cover_url = None
+                
+            result = {
+                'artist': artist,
+                'album': title,
+                'date': release_date,
+                'tracks': track_count,
+                'type': 'Album',
+                'tags': ['bandcamp'],
+                'cover_url': cover_url
+            }
+            
+            logger.info(f"Parsed Bandcamp page using meta tags: {result}")
+            return result
+                
+        # Если ничего не сработало, возвращаем базовую структуру с пометкой об ошибке
+        logger.error("All methods of parsing Bandcamp page failed")
         
-        # Проверяем JSON-LD для названия альбома
-        try:
-            if not album_name and json_ld:
-                data = json.loads(json_ld.string)
-                if 'name' in data:
-                    album_name = data['name']
-                    logger.info(f"Found album name via JSON-LD: {album_name}")
-        except Exception as e:
-            logger.error(f"Error parsing JSON-LD for album: {e}")
-        
-        if not album_name:
-            # В крайнем случае используем title страницы
-            if ' | ' in page_title:
-                parts = page_title.split(' | ')
+        # Пытаемся выделить хоть что-то из title
+        title_match = re.search(r'<title>([^<]+)</title>', html)
+        if title_match:
+            title_text = title_match.group(1)
+            logger.info(f"Found page title: {title_text}")
+            
+            # Если в title есть разделитель |, пробуем извлечь альбом и исполнителя
+            if ' | ' in title_text:
+                parts = title_text.split(' | ')
                 if len(parts) >= 2:
-                    album_name = parts[0].strip()
-                    logger.info(f"Using page title as album name: {album_name}")
+                    result = {
+                        'album': parts[0].strip(),
+                        'artist': parts[1].strip().replace(" | Bandcamp", ""),
+                        'date': datetime.now().strftime("%Y-%m-%d"),
+                        'tracks': "unknown",
+                        'type': 'Album',
+                        'tags': ['bandcamp'],
+                        'cover_url': None
+                    }
+                    logger.info(f"Extracted basic info from title: {result}")
+                    return result
         
-        if not album_name:
-            album_name = "Unknown Album"
-            logger.warning("Could not find album name")
-        
-        result['album'] = album_name
-        
-        # Release date - расширенный набор методов
-        release_date = None
-        
-        # Вариант 1: meta-теги
-        date_selectors = [
-            'meta[itemprop="datePublished"]',
-            'meta[property="music:release_date"]',
-            'meta[property="og:release_date"]'
-        ]
-        
-        for selector in date_selectors:
-            try:
-                date_elem = soup.select_one(selector)
-                if date_elem and 'content' in date_elem.attrs:
-                    release_date = date_elem['content']
-                    logger.info(f"Found release date via meta: {release_date}")
-                    break
-            except Exception as e:
-                logger.error(f"Error with date selector {selector}: {e}")
-        
-        # Вариант 2: текст выпуска - более гибкий поиск
-        if not release_date:
-            try:
-                # Ищем текст с "released" в разных вариантах
-                for text in soup.stripped_strings:
-                    if 'released' in text.lower():
-                        date_match = re.search(r'released\s+(\w+\s+\d+,?\s+\d{4}|\d{1,2}\s+\w+\s+\d{4}|\d{4}-\d{2}-\d{2})', text, re.IGNORECASE)
-                        if date_match:
-                            release_date = date_match.group(1)
-                            logger.info(f"Found release date via text: {release_date}")
-                            break
-            except Exception as e:
-                logger.error(f"Error finding release date in text: {e}")
-        
-        # Проверяем JSON-LD
-        try:
-            if not release_date and json_ld:
-                data = json.loads(json_ld.string)
-                if 'datePublished' in data:
-                    release_date = data['datePublished']
-                    logger.info(f"Found release date via JSON-LD: {release_date}")
-        except Exception as e:
-            logger.error(f"Error parsing JSON-LD for date: {e}")
-        
-        if not release_date:
-            release_date = datetime.now().strftime("%Y-%m-%d")
-            logger.warning("Using current date as release date")
-        
-        result['date'] = release_date
-        
-        # Track count - расширенный набор селекторов
-        selectors = [
-            'table[itemprop="tracks"] tr',
-            '.track_list tr',
-            '.track_row_view',
-            '.track_list .track-cell',
-            'tr.track_row_view',
-            'div[data-track]'
-        ]
-        
-        tracks = 0
-        for selector in selectors:
-            try:
-                track_elems = soup.select(selector)
-                if track_elems:
-                    tracks = len(track_elems)
-                    logger.info(f"Found {tracks} tracks via selector {selector}")
-                    break
-            except Exception as e:
-                logger.error(f"Error with track count selector {selector}: {e}")
-        
-        # Проверяем наличие трек-листа в JSON данных страницы
-        try:
-            if tracks == 0:
-                # Ищем переменную TralbumData в скриптах
-                for script in soup.find_all('script'):
-                    if script.string and 'TralbumData' in script.string:
-                        # Поиск трек-листа в TralbumData
-                        match = re.search(r'trackinfo\s*:\s*(\[.*?\])', script.string, re.DOTALL)
-                        if match:
-                            track_info_text = match.group(1)
-                            # Попытка преобразовать в JSON
-                            from json import loads
-                            try:
-                                # Упрощенная обработка для извлечения массива
-                                cleaned_text = re.sub(r'(\w+)\s*:', r'"\1":', track_info_text)
-                                # Заменяем одинарные кавычки на двойные для JSON
-                                cleaned_text = cleaned_text.replace("'", '"')
-                                track_info = json.loads(cleaned_text)
-                                tracks = len(track_info)
-                                logger.info(f"Found {tracks} tracks via TralbumData")
-                            except:
-                                # Более простой способ - просто посчитать вхождения "track_id"
-                                tracks = track_info_text.count('track_id')
-                                logger.info(f"Counted {tracks} occurrences of track_id")
+        # Совсем ничего не нашли
+        return None
             
-                        break
-            
-            # Еще один метод - искать ссылки на MP3 файлы
-            if tracks == 0:
-                mp3_links = soup.select('a[href$=".mp3"]')
-                if mp3_links:
-                    tracks = len(mp3_links)
-                    logger.info(f"Found {tracks} tracks via MP3 links")
-        except Exception as e:
-            logger.error(f"Error parsing track info from scripts: {e}")
-        
-        result['tracks'] = tracks if tracks else "unknown"
-        
-        # Cover image - расширенный набор селекторов
-        cover_selectors = [
-            '#tralbumArt img',
-            '.popupImage',
-            'img.album_art',
-            'meta[property="og:image"]',
-            'div[id="tralbumArt"] .popupImage img',
-            'img[class*="album_art"]'
-        ]
-        
-        cover_url = None
-        for selector in cover_selectors:
-            try:
-                if selector.startswith('meta'):
-                    img_elem = soup.select_one(selector)
-                    if img_elem and 'content' in img_elem.attrs:
-                        cover_url = img_elem['content']
-                        logger.info(f"Found cover image via meta: {cover_url}")
-                        break
-                else:
-                    img_elem = soup.select_one(selector)
-                    if img_elem and 'src' in img_elem.attrs:
-                        cover_url = img_elem['src']
-                        logger.info(f"Found cover image via selector {selector}: {cover_url}")
-                        break
-            except Exception as e:
-                logger.error(f"Error with cover image selector {selector}: {e}")
-        
-        # Проверяем JSON-LD
-        try:
-            if not cover_url and json_ld:
-                data = json.loads(json_ld.string)
-                if 'image' in data:
-                    if isinstance(data['image'], str):
-                        cover_url = data['image']
-                    elif isinstance(data['image'], dict) and 'url' in data['image']:
-                        cover_url = data['image']['url']
-                    logger.info(f"Found cover image via JSON-LD: {cover_url}")
-        except Exception as e:
-            logger.error(f"Error parsing JSON-LD for cover: {e}")
-        
-        if cover_url:
-            # Проверяем, что URL абсолютный, иначе добавляем домен
-            if cover_url.startswith('//'):
-                cover_url = 'https:' + cover_url
-            elif cover_url.startswith('/'):
-                # Получаем домен из URL страницы
-                from urllib.parse import urlparse
-                parsed_url = urlparse(url)
-                domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
-                cover_url = domain + cover_url
-            
-            result['cover_url'] = cover_url
-        
-        # Type (Album or Single)
-        album_type = "Album"  # Default
-        
-        # Проверяем наличие слова "single" в заголовке или других элементах
-        if page_title and 'single' in page_title.lower():
-            album_type = "Single"
-            logger.info("Identified as Single from title")
-            
-        # Если треков мало, скорее всего это сингл
-        if tracks and tracks <= 3:
-            album_type = "Single"
-            logger.info("Identified as Single based on track count")
-        
-        result['type'] = album_type
-        
-        # Tags - используем теги alt в обложке или любые другие
-        tags = []
-        tags_elem = soup.select('.tag')
-        for tag in tags_elem[:3]:  # Get up to 3 tags
-            try:
-                tag_text = tag.text.strip()
-                if tag_text:
-                    tags.append(tag_text)
-                    logger.info(f"Found tag: {tag_text}")
-            except Exception as e:
-                logger.error(f"Error with tag: {e}")
-        
-        # Дополнительные методы получения тегов/жанров
-        if not tags:
-            try:
-                # Поиск по meta keywords
-                keywords = soup.select_one('meta[name="keywords"]')
-                if keywords and 'content' in keywords.attrs:
-                    keyword_list = keywords['content'].split(',')
-                    for keyword in keyword_list[:3]:
-                        kw = keyword.strip()
-                        if kw:
-                            tags.append(kw)
-                            logger.info(f"Found tag from keywords: {kw}")
-            except Exception as e:
-                logger.error(f"Error getting tags from keywords: {e}")
-        
-        # Проверяем JSON-LD
-        try:
-            if not tags and json_ld:
-                data = json.loads(json_ld.string)
-                if 'genre' in data:
-                    genres = data['genre']
-                    if isinstance(genres, list):
-                        for genre in genres[:3]:
-                            tags.append(genre)
-                            logger.info(f"Found genre from JSON-LD: {genre}")
-                    elif isinstance(genres, str):
-                        tags.append(genres)
-                        logger.info(f"Found genre from JSON-LD: {genres}")
-        except Exception as e:
-            logger.error(f"Error parsing JSON-LD for genres: {e}")
-        
-        if not tags:
-            tags = ['bandcamp']
-            logger.warning("Using default tag: bandcamp")
-        
-        result['tags'] = tags
-        
-        # В конце функции добавим логирование результата
-        logger.info(f"Scraped Bandcamp result: {result}")
-        return result
     except Exception as e:
-        logger.error(f"Error scraping Bandcamp: {e}", exc_info=True)
+        logger.error(f"Critical error in scrape_bandcamp: {e}", exc_info=True)
         return None
 
 # Функции для корректного завершения
@@ -504,10 +333,34 @@ Available commands:
 /queue - Show posting queue
 /post - Post next item in queue manually
 /check - Check for new releases
+/debug - Debug a Bandcamp URL
 
 You can also send Spotify or Bandcamp links to add them to the queue."""
     
     await message.answer(help_text)
+
+@dp.message(Command("debug"))
+async def cmd_debug(message: Message):
+    logger.info("Received /debug command")
+    
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("❌ Please provide a URL to debug\nExample: /debug https://example.bandcamp.com/album/example")
+        return
+        
+    url = args[1].strip()
+    await message.answer(f"🔍 Debugging URL: {url}")
+    
+    if "bandcamp.com" in url:
+        await message.answer("Scraping Bandcamp URL...")
+        result = await scrape_bandcamp(url)
+        if result:
+            formatted_result = json.dumps(result, indent=2)
+            await message.answer(f"Scrape result:\n```\n{formatted_result}\n```", parse_mode="Markdown")
+        else:
+            await message.answer("❌ Failed to scrape Bandcamp URL")
+    else:
+        await message.answer("❌ Only Bandcamp URLs are supported for debug")
 
 @dp.message(Command("queue"))
 async def cmd_queue(message: Message):
@@ -624,7 +477,8 @@ async def cmd_post(message: Message):
             bandcamp_info = await scrape_bandcamp(url)
             logger.info(f"Bandcamp scrape result: {bandcamp_info}")
             
-            if bandcamp_info:
+            if bandcamp_info and bandcamp_info.get('album') != "Unknown Album":
+                # Если успешно получили данные
                 artist_name = bandcamp_info.get('artist', 'Unknown Artist')
                 album_name = bandcamp_info.get('album', 'Unknown Album')
                 release_date = bandcamp_info.get('date', datetime.now().strftime("%Y-%m-%d"))
@@ -639,7 +493,7 @@ async def cmd_post(message: Message):
                 
                 genre_tags = " ".join([f"#{tag.replace(' ', '')}" for tag in tags])
                 
-                # ТОЧНЫЙ ФОРМАТ ВЫВОДА ДЛЯ BANDCAMP (без форматирования оригинального текста)
+                # ТОЧНЫЙ ФОРМАТ ВЫВОДА ДЛЯ BANDCAMP
                 message_text = f"coma.fm\n" \
                               f"{artist_name}\n" \
                               f"{album_name}\n" \
@@ -653,15 +507,54 @@ async def cmd_post(message: Message):
                 else:
                     await bot.send_message(CHANNEL_ID, message_text, parse_mode="Markdown")
             else:
-                # Fallback if scraping failed
-                message_text = f"coma.fm\n" \
-                              f"Bandcamp Album\n" \
-                              f"Unknown Album\n" \
-                              f"{datetime.now().strftime('%Y-%m-%d')}, Album, unknown tracks\n" \
-                              f"#bandcamp\n" \
-                              f"🎧 Listen on [Bandcamp]({url})"
-                
-                await bot.send_message(CHANNEL_ID, message_text, parse_mode="Markdown")
+                # Если не удалось получить данные, используем прямой парсинг HTML
+                # Fallback если скрапинг не сработал - пытаемся получить информацию из превью Bandcamp
+                try:
+                    # Получаем превью из Telegram для URL
+                    await message.answer("Primary scraping failed, attempting to get Bandcamp preview...")
+                    
+                    # Используем тот же User-Agent для получения информации
+                    response = requests.get(url, headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/109.0.0.0 Safari/537.36'
+                    })
+                    html = response.text
+                    
+                    # Извлекаем данные через регулярные выражения из HTML
+                    title_match = re.search(r'<title>([^|]+) \| ([^<]+)</title>', html)
+                    if title_match:
+                        album_name = title_match.group(1).strip()
+                        artist_name = title_match.group(2).strip().replace(" | Bandcamp", "")
+                    else:
+                        album_name = "Unknown Album"
+                        artist_name = "Unknown Artist"
+                        
+                    # Поиск количества треков
+                    track_count_match = re.search(r'(\d+) track album', html)
+                    if track_count_match:
+                        tracks = track_count_match.group(1)
+                    else:
+                        tracks = "unknown"
+                        
+                    message_text = f"coma.fm\n" \
+                                 f"{artist_name}\n" \
+                                 f"{album_name}\n" \
+                                 f"{datetime.now().strftime('%Y-%m-%d')}, Album, {tracks} tracks\n" \
+                                 f"#bandcamp\n" \
+                                 f"🎧 Listen on [Bandcamp]({url})"
+                                 
+                    await bot.send_message(CHANNEL_ID, message_text, parse_mode="Markdown")
+                    
+                except Exception as e:
+                    logger.error(f"Fallback parsing failed too: {e}", exc_info=True)
+                    # Если все методы провалились, публикуем с минимумом информации
+                    message_text = f"coma.fm\n" \
+                                 f"Bandcamp Album\n" \
+                                 f"Unknown Album\n" \
+                                 f"{datetime.now().strftime('%Y-%m-%d')}, Album, unknown tracks\n" \
+                                 f"#bandcamp\n" \
+                                 f"🎧 Listen on [Bandcamp]({url})"
+                    
+                    await bot.send_message(CHANNEL_ID, message_text, parse_mode="Markdown")
                 
             logger.info(f"Posted to channel {CHANNEL_ID}")
             
@@ -690,286 +583,3 @@ async def cmd_post(message: Message):
 async def cmd_check(message: Message):
     logger.info("Received /check command")
     await message.answer("🔍 Checking for new releases...")
-    
-    sp = get_spotify_client()
-    if not sp:
-        await message.answer("❌ Spotify not initialized")
-        return
-    
-    try:
-        # Get followed artists - использовать пагинацию чтобы получить ВСЕ артисты
-        all_artists = []
-        results = sp.current_user_followed_artists(limit=50)
-        
-        artists = results['artists']['items']
-        all_artists.extend(artists)
-        
-        # Получаем все страницы артистов
-        while results['artists']['next']:
-            results = sp.next(results['artists'])
-            all_artists.extend(results['artists']['items'])
-        
-        logger.info(f"Found {len(all_artists)} followed artists")
-        
-        if not all_artists:
-            await message.answer("No followed artists found")
-            return
-        
-        # Получаем days_back из базы данных
-        days_back = 3
-        try:
-            result = supabase.table('bot_status').select('value').eq('key', 'release_days_threshold').execute()
-            if result.data:
-                days_back = int(result.data[0]['value'])
-        except:
-            pass
-        
-        cutoff_date = datetime.now() - timedelta(days=days_back)
-        
-        # Check for new releases
-        new_releases = []
-        new_releases_added = 0
-        
-        # Проверяем только первые 20 артистов, чтобы не тратить лимиты API
-        for artist in all_artists[:20]:
-            try:
-                artist_id = artist['id']
-                artist_name = artist['name']
-                
-                albums = sp.artist_albums(artist_id, album_type='album,single', country='US', limit=5)
-                
-                for album in albums['items']:
-                    album_id = album['id']
-                    album_name = album['name']
-                    release_date = album['release_date']
-                    
-                    # Parse release date
-                    try:
-                        if len(release_date) == 4:  # Year only
-                            release_datetime = datetime.strptime(release_date, '%Y')
-                        elif len(release_date) == 7:  # Year-month
-                            release_datetime = datetime.strptime(release_date, '%Y-%m')
-                        else:  # Full date
-                            release_datetime = datetime.strptime(release_date, '%Y-%m-%d')
-                    except:
-                        continue
-                    
-                    # Check if within threshold
-                    if release_datetime >= cutoff_date:
-                        logger.info(f"Found recent release: {artist_name} - {album_name} ({release_date})")
-                        
-                        # Add to result for user
-                        new_releases.append({
-                            'artist': artist_name,
-                            'album': album_name,
-                            'id': album_id
-                        })
-                        
-                        # Check if already in queue
-                        already_exists = any(
-                            item.get('item_id') == album_id and item.get('item_type') == 'album' 
-                            for item in posting_queue
-                        )
-                        
-                        if not already_exists:
-                            # Add to queue
-                            posting_queue.append({
-                                'item_id': album_id,
-                                'item_type': 'album',
-                                'added_at': datetime.now().isoformat()
-                            })
-                            
-                            # Save to database
-                            try:
-                                supabase.table('post_queue').insert({
-                                    'item_id': album_id,
-                                    'item_type': 'album',
-                                    'added_at': datetime.now().isoformat()
-                                }).execute()
-                                
-                                new_releases_added += 1
-                            except Exception as e:
-                                logger.error(f"Error saving to database: {e}")
-            except Exception as e:
-                logger.error(f"Error checking artist {artist['name']}: {e}")
-        
-        # Update last check time
-        try:
-            supabase.table('bot_status').upsert({
-                'key': 'last_check',
-                'value': datetime.now().isoformat()
-            }).execute()
-        except:
-            pass
-        
-        if new_releases:
-            result_text = f"Found {len(new_releases)} recent releases, added {new_releases_added} to queue:\n\n"
-            for rel in new_releases:
-                result_text += f"• {rel['artist']} - {rel['album']}\n"
-        else:
-            result_text = "No recent releases found"
-        
-        await message.answer(result_text)
-        
-    except Exception as e:
-        logger.error(f"Error checking releases: {e}")
-        await message.answer(f"❌ Error: {str(e)}")
-
-# ЭТОТ ОБРАБОТЧИК ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ
-@dp.message()
-async def handle_links(message: Message):
-    try:
-        logger.info(f"Received message: {message.text}")
-        
-        if not message.text:
-            return
-        
-        # Проверка Spotify
-        spotify_match = re.search(r'https://open\.spotify\.com/album/([a-zA-Z0-9]+)', message.text)
-        if spotify_match:
-            album_id = spotify_match.group(1)
-            logger.info(f"Found Spotify album ID: {album_id}")
-            
-            # Check if already in queue
-            already_exists = any(item.get('item_id') == album_id and item.get('item_type') == 'album' for item in posting_queue)
-            
-            if already_exists:
-                await message.answer(f"ℹ️ Album already in queue")
-                return
-            
-            # Validate album exists
-            sp = get_spotify_client()
-            if sp:
-                try:
-                    album = sp.album(album_id)
-                    artist_name = ', '.join([artist['name'] for artist in album['artists']])
-                    album_name = album['name']
-                    
-                    # Add to queue
-                    posting_queue.append({
-                        'item_id': album_id,
-                        'item_type': 'album',
-                        'added_at': datetime.now().isoformat()
-                    })
-                    
-                    # Try to save to database (if table exists)
-                    try:
-                        supabase.table('post_queue').insert({
-                            'item_id': album_id,
-                            'item_type': 'album',
-                            'added_at': datetime.now().isoformat()
-                        }).execute()
-                    except Exception as e:
-                        logger.error(f"Error saving to database: {e}")
-                    
-                    await message.answer(f"✅ Added album to queue")
-                    return
-                except Exception as e:
-                    logger.error(f"Error validating album: {e}")
-                    await message.answer(f"❌ Error adding album: {str(e)}")
-                    return
-            else:
-                # Add without validation
-                posting_queue.append({
-                    'item_id': album_id,
-                    'item_type': 'album',
-                    'added_at': datetime.now().isoformat()
-                })
-                await message.answer(f"✅ Added album to queue")
-                return
-        
-        # Проверка Bandcamp - более общий паттерн 
-        bandcamp_match = re.search(r'https?://[^/]*?bandcamp\.com/album/([^/?#]+)', message.text)
-        if bandcamp_match:
-            album_slug = bandcamp_match.group(1)
-            logger.info(f"Found Bandcamp album: {album_slug}")
-            
-            item_id = f"bandcamp_{album_slug}"
-            
-            # Check if already in queue
-            already_exists = any(item.get('item_id') == item_id for item in posting_queue)
-            
-            if already_exists:
-                await message.answer(f"ℹ️ Album already in queue")
-                return
-            
-            # Add to queue
-            posting_queue.append({
-                'item_id': item_id,
-                'item_type': 'bandcamp',
-                'added_at': datetime.now().isoformat(),
-                'metadata': {'url': message.text}
-            })
-            
-            # Try to save to database (if table exists)
-            try:
-                supabase.table('post_queue').insert({
-                    'item_id': item_id,
-                    'item_type': 'bandcamp',
-                    'added_at': datetime.now().isoformat()
-                }).execute()
-            except Exception as e:
-                logger.error(f"Error saving to database: {e}")
-            
-            await message.answer(f"✅ Added Bandcamp album to queue")
-            return
-        
-        logger.info("No music link found")
-    except Exception as e:
-        logger.error(f"Error in message handler: {e}", exc_info=True)
-        try:
-            await message.answer(f"❌ Ошибка при обработке сообщения: {str(e)}")
-        except:
-            logger.error("Failed to send error message")
-
-async def main():
-    # Регистрируем обработчики сигналов
-    register_shutdown_handlers()
-    
-    # Пробуем загрузить очередь из базы данных
-    try:
-        result = supabase.table('post_queue').select('*').eq('posted', False).order('id').execute()
-        global posting_queue
-        posting_queue = result.data if result.data else []
-        logger.info(f"Loaded {len(posting_queue)} items from queue")
-    except Exception as e:
-        logger.error(f"Error loading queue: {e}")
-        logger.info("Starting with empty queue")
-    
-    # Запускаем задачу обновления статуса
-    asyncio.create_task(update_bot_status())
-    
-    # Добавляем обработчики запуска и завершения
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-    
-    # Сбрасываем webhook перед запуском
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Webhook deleted successfully")
-    except Exception as e:
-        logger.error(f"Error deleting webhook: {e}")
-    
-    logger.info("Starting bot polling...")
-    
-    # Запускаем поллинг
-    try:
-        await dp.start_polling(bot, skip_updates=True)
-    except TelegramConflictError as e:
-        logger.error(f"Telegram conflict error: {e}")
-        # Ждем перед повторной попыткой
-        await asyncio.sleep(10)
-        
-        # Пробуем снова
-        try:
-            await bot.delete_webhook(drop_pending_updates=True)
-            await dp.start_polling(bot, skip_updates=True)
-        except Exception as retry_e:
-            logger.error(f"Failed to restart after conflict: {retry_e}")
-            sys.exit(1)
-    except Exception as e:
-        logger.error(f"Error starting bot: {e}", exc_info=True)
-        sys.exit(1)
-
-if __name__ == "__main__":
-    asyncio.run(main())
