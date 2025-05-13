@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import json
+import aiohttp
 import requests
 import signal
 import sys
@@ -113,7 +114,7 @@ async def scrape_bandcamp(url):
                 data = json.loads(data_json_str)
                 
                 # Логируем весь найденный JSON для отладки
-                logger.info(f"Found data-tralbum JSON data")
+                logger.info(f"Found data-tralbum JSON: {data}")
                 
                 # Извлекаем данные об исполнителе
                 if 'artist' in data:
@@ -816,7 +817,7 @@ async def handle_links(message: Message):
         await message.answer(f"❌ Error processing message: {str(e)}")
 
 async def main():
-    # Логируем старт
+    # Логируем старт для отладки
     logger.info("Starting bot application...")
     
     # Регистрируем обработчики сигналов
@@ -833,17 +834,24 @@ async def main():
         logger.info("Starting with empty queue")
     
     # Запускаем задачу обновления статуса
-    asyncio.create_task(update_bot_status())
-    
-    # Сбрасываем webhook перед запуском
     try:
-        await on_startup()
+        asyncio.create_task(update_bot_status())
     except Exception as e:
-        logger.error(f"Error in startup: {e}")
+        logger.error(f"Error starting status update task: {e}")
     
-    # Запускаем поллинг
+    # Минимальный вариант запуска с полным логированием
     try:
+        # Сбрасываем webhook для предотвращения конфликтов
+        logger.info("Deleting webhook...")
+        await bot.delete_webhook(drop_pending_updates=True)
+        
+        # Вызываем on_startup вручную
+        await on_startup()
+        
+        # Логируем запуск поллинга
         logger.info("Starting polling...")
+        
+        # Запускаем простой поллинг 
         await dp.start_polling(bot)
     except TelegramConflictError as e:
         logger.error(f"Telegram conflict error: {e}")
@@ -858,8 +866,15 @@ async def main():
             logger.error(f"Failed to restart after conflict: {retry_e}")
             sys.exit(1)
     except Exception as e:
-        logger.error(f"Error starting bot: {e}", exc_info=True)
+        logger.error(f"Critical error starting bot: {e}", exc_info=True)
         sys.exit(1)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by keyboard interrupt")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Unhandled exception: {e}", exc_info=True)
+        sys.exit(1)
